@@ -243,9 +243,20 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    focusTarget: root.unlocked ? searchInput : unlockBtn
     contentWidth: popup.fittedContentWidth(Style.space(440))
     contentHeight: popup.cappedContentHeight(Style.space(520))
+
+    onOpenChanged: {
+      if (open) {
+        Qt.callLater(function() {
+          if (root.unlocked) {
+            searchInput.forceActiveFocus()
+          } else {
+            unlockBtn.forceActiveFocus()
+          }
+        })
+      }
+    }
 
     ColumnLayout {
       anchors.fill: parent
@@ -260,7 +271,7 @@ BarWidget {
           text: "󰌆 1Password"
           font.family: root.fontFamily
           color: root.colForeground
-          font.pixelSize: Style.font.titleSmall
+          font.pixelSize: Style.font.title
           font.bold: true
         }
 
