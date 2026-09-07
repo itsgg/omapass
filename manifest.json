@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "gg.omapass",
+  "name": "OmaPass",
+  "version": "1.0.0",
+  "author": "Ganesh Gunasegaran <me@itsgg.com>",
+  "license": "MIT",
+  "description": "Native 1Password bar widget and instant vault launcher for Omarchy",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaPass",
+    "description": "1Password in the Omarchy bar: instant search, copy credentials, TOTP, and biometric unlock",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "clipboardTimeout": 30,
+      "defaultAction": "password"
+    },
+    "schema": [
+      {
+        "key": "clipboardTimeout",
+        "type": "integer",
+        "label": "Clipboard auto-clear delay (seconds)",
+        "min": 5,
+        "max": 120,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "Wipes copied password from clipboard after this duration."
+      },
+      {
+        "key": "defaultAction",
+        "type": "enum",
+        "label": "Primary click/Enter action",
+        "options": [
+          "password",
+          "username",
+          "otp"
+        ],
+        "defaultValue": "password",
+        "description": "Action executed when pressing Enter on a highlighted item."
+      }
+    ]
+  }
+}
