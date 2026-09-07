@@ -9,7 +9,7 @@ Features:
 - Keeps non-sensitive vault item metadata (IDs, titles, usernames, categories) in fast memory cache
 - Ultra-responsive in-memory fuzzy search (<1ms)
 - Fetches secrets (passwords, TOTPs, secure notes) only on-demand
-- Pipes credentials directly to wl-copy with cancellable, process-independent automatic clipboard wipe timer
+- Pipes credentials directly to wl-copy with token-owned automatic clipboard wipe timer
 - Preserves intentional whitespace in credentials
 - Optional autotype into active Wayland window via wtype
 - Supports direct CLI invocations for easy testing and terminal usage
@@ -65,8 +65,19 @@ def wipe_pid_path() -> pathlib.Path:
     return runtime_dir() / "omapass-wipe.pid"
 
 
+def token_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-clipboard.token"
+
+
 def cancel_previous_wipe() -> None:
-    """Terminates any previously running clipboard wipe subshell and cleans up PID file."""
+    """Invalidates the wipe token and terminates any previously running clipboard wipe subshell."""
+    tp = token_path()
+    try:
+        if tp.exists():
+            tp.unlink()
+    except OSError:
+        pass
+
     wp = wipe_pid_path()
     if wp.exists():
         try:
@@ -85,7 +96,7 @@ def cancel_previous_wipe() -> None:
 
 
 def wipe_clipboard_now() -> None:
-    """Immediately clears the clipboard and terminates any scheduled wipe."""
+    """Immediately clears the clipboard and invalidates any scheduled wipe."""
     cancel_previous_wipe()
     try:
         subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
@@ -214,7 +225,6 @@ class OmaPassService:
 
     def unlock(self) -> Dict[str, Any]:
         """Triggers 1Password unlock prompt."""
-        # 1. Desktop app quick-access (biometric / system authentication)
         if shutil.which("1password"):
             try:
                 subprocess.Popen(
@@ -226,7 +236,6 @@ class OmaPassService:
             except Exception:
                 pass
 
-        # 2. Interactive terminal sign-in fallback for standalone CLI mode
         term = os.environ.get("TERMINAL")
         if not term:
             for candidate in ["alacritty", "foot", "kitty", "ghostty", "xterm"]:
@@ -442,7 +451,7 @@ class OmaPassService:
         title: str = "",
         timeout_seconds: int = DEFAULT_CLIPBOARD_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Fetches field, writes to wl-copy, cancels prior wipe only after confirmation, and schedules auto-wipe."""
+        """Fetches field, writes to wl-copy, coordinates ownership token to prevent premature wiping, and notifies."""
         ok, value = self.fetch_field(item_id, field)
         if not ok:
             return {"ok": False, "error": value}
@@ -461,19 +470,37 @@ class OmaPassService:
         except Exception as e:
             return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
-        # ONLY after new content is successfully copied do we cancel any previous wipe
-        cancel_previous_wipe()
+        # Successful clipboard replacement: kill old wipe process if still running
+        wp = wipe_pid_path()
+        if wp.exists():
+            try:
+                old_pid = int(wp.read_text().strip())
+                os.kill(old_pid, signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+            try:
+                wp.unlink()
+            except OSError:
+                pass
 
-        # Schedule automatic clipboard wipe only for sensitive fields (password, otp)
+        tp = token_path()
+        # For sensitive fields (password, otp), generate an exclusive token matching this copy
         if field in ("password", "otp") and timeout_seconds > 0:
-            wp = wipe_pid_path()
+            token = f"{time.time()}-{os.getpid()}"
+            temp_tp = tp.with_suffix(".tmp")
+            temp_tp.write_text(token)
+            os.chmod(temp_tp, 0o600)
+            temp_tp.replace(tp)
+
+            # Timer only clears if current token on disk still matches this operation's token
+            cmd = (
+                f"sleep {int(timeout_seconds)} && "
+                f"[ \"$(cat '{tp}' 2>/dev/null)\" = '{token}' ] && "
+                f"wl-copy --clear && rm -f '{tp}' '{wp}'"
+            )
             try:
                 wipe_proc = subprocess.Popen(
-                    [
-                        "bash",
-                        "-c",
-                        f"sleep {int(timeout_seconds)} && wl-copy --clear && rm -f '{wp}'",
-                    ],
+                    ["bash", "-c", cmd],
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -483,6 +510,13 @@ class OmaPassService:
                 os.chmod(wp, 0o600)
             except Exception:
                 pass
+        else:
+            # For non-sensitive credentials (e.g. username), invalidate any active wipe token
+            if tp.exists():
+                try:
+                    tp.unlink()
+                except OSError:
+                    pass
 
         # Desktop notification
         label = "One-Time Password (TOTP)" if field == "otp" else field.capitalize()
