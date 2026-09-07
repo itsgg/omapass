@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -90,7 +91,6 @@ class TestOmaPassService(unittest.TestCase):
     def test_fetch_field_preserves_whitespace(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
-        # Password has leading and trailing spaces
         mock_proc.stdout = "  secret password with spaces  \n"
         mock_run.return_value = mock_proc
 
@@ -98,13 +98,14 @@ class TestOmaPassService(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(val, "  secret password with spaces  ")
 
-
-    def test_cancel_previous_wipe_cleans_file(self):
-        wp = agent.wipe_pid_path()
-        wp.write_text("999999999")
-        self.assertTrue(wp.exists())
-        agent.cancel_previous_wipe()
-        self.assertFalse(wp.exists())
+    def test_cancel_previous_wipe_cleans_file_isolated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_pid_file = pathlib.Path(tmpdir) / "omapass-wipe.pid"
+            test_pid_file.write_text("999999999")
+            with patch.object(agent, "wipe_pid_path", return_value=test_pid_file):
+                self.assertTrue(test_pid_file.exists())
+                agent.cancel_previous_wipe()
+                self.assertFalse(test_pid_file.exists())
 
 
 if __name__ == "__main__":

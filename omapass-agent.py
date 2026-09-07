@@ -73,7 +73,6 @@ def cancel_previous_wipe() -> None:
             pid_str = wp.read_text().strip()
             if pid_str.isdigit():
                 old_pid = int(pid_str)
-                # Terminate the background sleep/wipe subshell
                 os.kill(old_pid, signal.SIGTERM)
         except (OSError, ValueError):
             pass
@@ -83,6 +82,15 @@ def cancel_previous_wipe() -> None:
                     wp.unlink()
             except OSError:
                 pass
+
+
+def wipe_clipboard_now() -> None:
+    """Immediately clears the clipboard and terminates any scheduled wipe."""
+    cancel_previous_wipe()
+    try:
+        subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
+    except Exception:
+        pass
 
 
 class OmaPassService:
@@ -242,8 +250,8 @@ class OmaPassService:
         return {"ok": False, "error": "Could not launch unlock prompt."}
 
     def lock_vault(self) -> Dict[str, Any]:
-        """Locks 1Password, cancels clipboard wipe, and clears metadata cache."""
-        cancel_previous_wipe()
+        """Locks 1Password, immediately clears clipboard, and clears metadata cache."""
+        wipe_clipboard_now()
         with self.lock:
             self._clear_cache()
 
@@ -258,7 +266,7 @@ class OmaPassService:
         except Exception:
             pass
 
-        return {"ok": True, "message": "Vault locked and cache cleared."}
+        return {"ok": True, "message": "Vault locked, clipboard wiped, and cache cleared."}
 
     def sync(self) -> Dict[str, Any]:
         """Syncs item metadata from 1Password into memory cache."""
@@ -417,7 +425,6 @@ class OmaPassService:
                 timeout=8.0,
             )
             if res.returncode == 0:
-                # Strip only trailing line-endings, preserving deliberate user whitespace
                 raw_val = res.stdout.removesuffix("\r\n").removesuffix("\n")
                 return True, raw_val
             else:
@@ -435,14 +442,12 @@ class OmaPassService:
         title: str = "",
         timeout_seconds: int = DEFAULT_CLIPBOARD_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Fetches field, cancels any previous wipe, pipes to wl-copy, schedules wipe, and notifies."""
+        """Fetches field, writes to wl-copy, cancels prior wipe only after confirmation, and schedules auto-wipe."""
         ok, value = self.fetch_field(item_id, field)
         if not ok:
             return {"ok": False, "error": value}
 
-        # Cancel any obsolete clipboard wipe from an earlier copy operation
-        cancel_previous_wipe()
-
+        # Pipe to wl-copy and verify successful exit code before modifying wipe schedule
         try:
             proc = subprocess.Popen(
                 ["wl-copy"],
@@ -451,8 +456,13 @@ class OmaPassService:
                 stderr=subprocess.DEVNULL,
             )
             proc.communicate(input=value.encode("utf-8"), timeout=2.0)
+            if proc.returncode != 0:
+                return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
         except Exception as e:
             return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
+
+        # ONLY after new content is successfully copied do we cancel any previous wipe
+        cancel_previous_wipe()
 
         # Schedule automatic clipboard wipe only for sensitive fields (password, otp)
         if field in ("password", "otp") and timeout_seconds > 0:
@@ -636,10 +646,8 @@ def run_daemon():
     os.chmod(dlp, 0o600)
 
     try:
-        # Acquire non-blocking exclusive lock. If another daemon holds it, exit immediately.
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
-        # Daemon already running
         sys.exit(0)
 
     sp = socket_path()
@@ -685,7 +693,6 @@ def run_daemon():
             server.close()
             if sp.exists():
                 sp.unlink()
-            cancel_previous_wipe()
             fcntl.flock(lock_file, fcntl.LOCK_UN)
             lock_file.close()
         except Exception:
