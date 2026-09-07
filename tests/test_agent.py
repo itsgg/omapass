@@ -107,6 +107,15 @@ class TestOmaPassService(unittest.TestCase):
                 agent.cancel_previous_wipe()
                 self.assertFalse(test_pid_file.exists())
 
+    @patch("subprocess.Popen")
+    def test_copy_to_clipboard_error_handling(self, mock_popen):
+        mock_popen.side_effect = FileNotFoundError("wl-copy not found")
+        with patch.object(self.service, "fetch_field", return_value=(True, "secret123")):
+            res = self.service.copy_to_clipboard("item1", "password")
+            self.assertFalse(res["ok"])
+            self.assertIn("error", res)
+            self.assertIn("Failed to run wl-copy", res["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

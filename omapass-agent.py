@@ -10,6 +10,7 @@ Features:
 - Ultra-responsive in-memory fuzzy search (<1ms)
 - Fetches secrets (passwords, TOTPs, secure notes) only on-demand
 - Pipes credentials directly to wl-copy with serialized token ownership for automatic clipboard wipe
+- Robust structured error handling across both daemon and direct fallback execution
 - Preserves intentional whitespace in credentials
 - Optional autotype into active Wayland window via wtype
 - Supports direct CLI invocations for easy testing and terminal usage
@@ -480,16 +481,19 @@ class OmaPassService:
                 os.chmod(clp, 0o600)
                 fcntl.flock(clf, fcntl.LOCK_EX)
                 try:
-                    # Pipe to wl-copy and verify exit code before modifying wipe token/timers
-                    proc = subprocess.Popen(
-                        ["wl-copy"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    proc.communicate(input=value.encode("utf-8"), timeout=2.0)
-                    if proc.returncode != 0:
-                        return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
+                    # Pipe to wl-copy with structured exception handling
+                    try:
+                        proc = subprocess.Popen(
+                            ["wl-copy"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        proc.communicate(input=value.encode("utf-8"), timeout=2.0)
+                        if proc.returncode != 0:
+                            return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
+                    except Exception as e:
+                        return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
                     # Kill previous wipe process if running
                     wp = wipe_pid_path()
@@ -770,17 +774,20 @@ def run_daemon():
 
 
 def handle_request(req: Dict[str, Any]):
-    """Dispatches request via daemon socket, auto-starting daemon if needed."""
-    ensure_daemon()
-    resp = send_socket_request(req, timeout=8.0)
-    if resp is not None:
-        print(json.dumps(resp))
-        return
+    """Dispatches request via daemon socket, auto-starting daemon if needed, with structured error handling."""
+    try:
+        ensure_daemon()
+        resp = send_socket_request(req, timeout=8.0)
+        if resp is not None:
+            print(json.dumps(resp))
+            return
 
-    # Direct fallback if socket failed
-    service = OmaPassService()
-    resp = service.dispatch(req)
-    print(json.dumps(resp))
+        # Direct fallback if socket failed
+        service = OmaPassService()
+        resp = service.dispatch(req)
+        print(json.dumps(resp))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def main():
