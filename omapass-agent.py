@@ -4,12 +4,13 @@ OmaPass Agent - Secret-isolating, high-performance backend helper for 1Password 
 
 Features:
 - Connects to 1Password CLI (op) and desktop daemon
+- Auto-spawns persistent background daemon listening on secure Unix domain socket ($XDG_RUNTIME_DIR/omapass.sock)
 - Keeps non-sensitive vault item metadata (IDs, titles, usernames, categories) in fast memory cache
 - Ultra-responsive in-memory fuzzy search (<1ms)
 - Fetches secrets (passwords, TOTPs, secure notes) only on-demand
-- Pipes credentials directly to wl-copy with automatic clipboard wipe timer
+- Pipes credentials directly to wl-copy with process-independent automatic clipboard wipe timer
+- Preserves intentional whitespace in credentials
 - Optional autotype into active Wayland window via wtype
-- Serves requests over a secure Unix domain socket ($XDG_RUNTIME_DIR/omapass.sock, mode 0600)
 - Supports direct CLI invocations for easy testing and terminal usage
 """
 
@@ -17,7 +18,6 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import shutil
 import signal
 import socket
@@ -116,7 +116,6 @@ class OmaPassService:
                 "error": "1Password CLI (op) is not installed.",
             }
 
-        # op whoami runs fast (~50ms) and fails if locked or unauthenticated
         try:
             res = subprocess.run(
                 ["op", "whoami", "--format=json"],
@@ -178,10 +177,8 @@ class OmaPassService:
 
     def unlock(self) -> Dict[str, Any]:
         """Triggers 1Password unlock prompt."""
-        # Check if 1password desktop app is running
-        has_desktop = shutil.which("1password") is not None
-        if has_desktop:
-            # Trigger quick-access or toggle to bring up biometric / master password prompt
+        # 1. Desktop app quick-access (biometric / system authentication)
+        if shutil.which("1password"):
             try:
                 subprocess.Popen(
                     ["1password", "--quick-access"],
@@ -192,30 +189,40 @@ class OmaPassService:
             except Exception:
                 pass
 
-        # Fallback to op signin
-        try:
-            subprocess.Popen(
-                ["op", "signin"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return {"ok": True, "method": "cli", "message": "Triggered op signin"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        # 2. Interactive terminal sign-in fallback for standalone CLI mode
+        term = os.environ.get("TERMINAL")
+        if not term:
+            for candidate in ["alacritty", "foot", "kitty", "ghostty", "xterm"]:
+                if shutil.which(candidate):
+                    term = candidate
+                    break
+
+        if term:
+            try:
+                cmd = f"op signin && sleep 1"
+                subprocess.Popen(
+                    [term, "-e", "bash", "-c", cmd],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return {"ok": True, "method": "terminal", "message": f"Launched terminal signin via {term}"}
+            except Exception:
+                pass
+
+        return {"ok": False, "error": "Could not launch unlock prompt."}
 
     def lock_vault(self) -> Dict[str, Any]:
         """Locks 1Password and clears metadata cache."""
         with self.lock:
             self._clear_cache()
 
-        # If desktop app is available, call 1password --lock
         if shutil.which("1password"):
             try:
                 subprocess.run(["1password", "--lock"], check=False, timeout=3.0)
             except Exception:
                 pass
 
-        # Also call op signout if signed in via standalone
         try:
             subprocess.run(["op", "signout"], check=False, timeout=3.0)
         except Exception:
@@ -297,7 +304,6 @@ class OmaPassService:
 
         for item in items:
             item_cat = item.get("category", "")
-            # Category filtering
             if cat and cat != "ALL":
                 if cat == "FAVORITES":
                     if not item.get("favorite"):
@@ -314,7 +320,6 @@ class OmaPassService:
                 elif cat != item_cat:
                     continue
 
-            # Query matching & scoring
             if not q:
                 score = 100 if item.get("favorite") else 10
                 results.append((score, item))
@@ -357,7 +362,7 @@ class OmaPassService:
         }
 
     def fetch_field(self, item_id: str, field: str) -> Tuple[bool, str]:
-        """Fetches a specific secret or credential field from 1Password."""
+        """Fetches a specific secret or credential field from 1Password without trimming whitespace."""
         if not self.check_op_installed():
             return False, "op CLI not installed"
 
@@ -382,7 +387,9 @@ class OmaPassService:
                 timeout=8.0,
             )
             if res.returncode == 0:
-                return True, res.stdout.strip()
+                # Strip only the trailing newline(s) added by the CLI, preserving user whitespace
+                raw_val = res.stdout.removesuffix("\r\n").removesuffix("\n")
+                return True, raw_val
             else:
                 err = res.stderr.strip() or f"Failed to retrieve {field}"
                 return False, err
@@ -403,7 +410,6 @@ class OmaPassService:
         if not ok:
             return {"ok": False, "error": value}
 
-        # Pipe directly to wl-copy without writing to stdout
         try:
             proc = subprocess.Popen(
                 ["wl-copy"],
@@ -415,22 +421,20 @@ class OmaPassService:
         except Exception as e:
             return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
-        # Cancel any previous wipe timer
-        with self.lock:
-            if self.clipboard_timer:
-                self.clipboard_timer.cancel()
-                self.clipboard_timer = None
-
-            if field in ("password", "otp") and timeout_seconds > 0:
-                def wipe_clipboard():
-                    try:
-                        subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
-                    except Exception:
-                        pass
-
-                self.clipboard_timer = threading.Timer(float(timeout_seconds), wipe_clipboard)
-                self.clipboard_timer.daemon = True
-                self.clipboard_timer.start()
+        # Schedule automatic clipboard wipe.
+        # To guarantee survival even if this process or thread terminates,
+        # we spawn an independent detached sleep subshell:
+        if field in ("password", "otp") and timeout_seconds > 0:
+            try:
+                subprocess.Popen(
+                    ["bash", "-c", f"sleep {int(timeout_seconds)} && wl-copy --clear"],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
 
         # Desktop notification
         label = "One-Time Password (TOTP)" if field == "otp" else field.capitalize()
@@ -552,6 +556,30 @@ def send_socket_request(request: Dict[str, Any], timeout: float = 3.0) -> Option
         sock.close()
 
 
+def ensure_daemon() -> None:
+    """Ensures background daemon is running, spawning it if needed."""
+    if send_socket_request({"action": "ping"}, timeout=0.4) is not None:
+        return
+
+    # Spawn daemon detached
+    script_path = pathlib.Path(__file__).resolve()
+    try:
+        subprocess.Popen(
+            [sys.executable, str(script_path), "serve"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        # Wait up to 1.5 seconds for socket initialization
+        for _ in range(15):
+            time.sleep(0.1)
+            if send_socket_request({"action": "ping"}, timeout=0.2) is not None:
+                break
+    except Exception:
+        pass
+
+
 def run_daemon():
     """Runs OmaPass background daemon listening on Unix domain socket."""
     sp = socket_path()
@@ -615,12 +643,14 @@ def run_daemon():
 
 
 def handle_request(req: Dict[str, Any]):
-    """Attempts socket request first; falls back to local execution."""
+    """Dispatches request via daemon socket, auto-starting daemon if needed."""
+    ensure_daemon()
     resp = send_socket_request(req, timeout=8.0)
     if resp is not None:
         print(json.dumps(resp))
         return
 
+    # Direct fallback if socket failed
     service = OmaPassService()
     resp = service.dispatch(req)
     print(json.dumps(resp))
@@ -648,6 +678,7 @@ def main():
     copy_parser.add_argument("id", help="Item ID")
     copy_parser.add_argument("field", default="password", nargs="?", choices=["password", "username", "otp"])
     copy_parser.add_argument("--title", "-t", default="", help="Item title")
+    copy_parser.add_argument("--timeout", type=int, default=DEFAULT_CLIPBOARD_TIMEOUT, help="Clipboard wipe timeout")
 
     type_parser = subparsers.add_parser("type", help="Type field via wtype")
     type_parser.add_argument("id", help="Item ID")
@@ -675,7 +706,7 @@ def main():
     elif args.command == "list":
         handle_request({"action": "list", "query": args.query, "category": args.category})
     elif args.command == "copy":
-        handle_request({"action": "copy", "id": args.id, "field": args.field, "title": args.title})
+        handle_request({"action": "copy", "id": args.id, "field": args.field, "title": args.title, "timeout": args.timeout})
     elif args.command == "type":
         handle_request({"action": "type", "id": args.id, "field": args.field})
     else:

@@ -56,7 +56,6 @@ class TestOmaPassService(unittest.TestCase):
         res = self.service.search_items()
         self.assertTrue(res["ok"])
         self.assertEqual(len(res["items"]), 4)
-        # Favorites should come first
         self.assertTrue(res["items"][0]["favorite"])
 
     def test_search_query_prefix(self):
@@ -86,6 +85,18 @@ class TestOmaPassService(unittest.TestCase):
     def test_dispatch_unknown(self):
         res = self.service.dispatch({"action": "nonexistent"})
         self.assertFalse(res["ok"])
+
+    @patch("subprocess.run")
+    def test_fetch_field_preserves_whitespace(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        # Password has leading and trailing spaces
+        mock_proc.stdout = "  secret password with spaces  \n"
+        mock_run.return_value = mock_proc
+
+        ok, val = self.service.fetch_field("item1", "password")
+        self.assertTrue(ok)
+        self.assertEqual(val, "  secret password with spaces  ")
 
 
 if __name__ == "__main__":

@@ -22,12 +22,17 @@ BarWidget {
   function toggle() { popupOpen ? close() : open() }
   readonly property bool opened: popupOpen
 
+  // Settings from shell.json configuration
+  readonly property int clipboardTimeout: setting("clipboardTimeout", 30)
+  readonly property string defaultAction: setting("defaultAction", "password")
+
   // Vault state
   property bool installed: true
   property bool unlocked: false
   property string account: ""
   property int itemCount: 0
   property bool busy: false
+  property string lastRunAction: ""
 
   // Search & Navigation
   property string searchQuery: ""
@@ -122,7 +127,13 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         root.busy = false
+        var completedAction = root.lastRunAction
+        root.lastRunAction = ""
         checkStatus()
+        // If sync finished, reload the fresh items
+        if (completedAction === "sync") {
+          root.refreshItems()
+        }
       }
     }
   }
@@ -130,6 +141,7 @@ BarWidget {
   function runAction(payload) {
     if (actionProc.running) return
     root.busy = true
+    root.lastRunAction = payload.action || ""
     actionProc.command = [
       "python3",
       root.helperPath,
@@ -152,15 +164,15 @@ BarWidget {
 
   function syncVault() {
     runAction({ action: "sync" })
-    refreshItems()
   }
 
   function copyField(itemId, field, title) {
     runAction({
       action: "copy",
       id: itemId,
-      field: field,
-      title: title || ""
+      field: field || root.defaultAction,
+      title: title || "",
+      timeout: root.clipboardTimeout
     })
     root.close()
   }
@@ -328,11 +340,12 @@ BarWidget {
         visible: !root.unlocked
         Layout.fillWidth: true
         Layout.fillHeight: true
-        alignment: Qt.AlignCenter
         spacing: Style.space(12)
 
+        Item { Layout.fillHeight: true }
+
         Text {
-          Layout.alignment: Qt.AlignCenter
+          Layout.alignment: Qt.AlignHCenter
           text: "󰌏"
           font.family: root.fontFamily
           font.pixelSize: Style.space(48)
@@ -340,7 +353,7 @@ BarWidget {
         }
 
         Text {
-          Layout.alignment: Qt.AlignCenter
+          Layout.alignment: Qt.AlignHCenter
           text: "1Password Vault Locked"
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -349,7 +362,7 @@ BarWidget {
         }
 
         Text {
-          Layout.alignment: Qt.AlignCenter
+          Layout.alignment: Qt.AlignHCenter
           text: root.account ? root.account : "Unlock with fingerprint or master password"
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -360,7 +373,7 @@ BarWidget {
 
         Rectangle {
           id: unlockBtn
-          Layout.alignment: Qt.AlignCenter
+          Layout.alignment: Qt.AlignHCenter
           Layout.preferredWidth: Style.space(160)
           Layout.preferredHeight: Style.space(36)
           radius: Style.space(8)
@@ -397,6 +410,8 @@ BarWidget {
           Keys.onReturnPressed: root.unlock()
           Keys.onEnterPressed: root.unlock()
         }
+
+        Item { Layout.fillHeight: true }
       }
 
       // ========================================== UNLOCKED STATE
@@ -471,7 +486,7 @@ BarWidget {
                 } else if (event.modifiers & Qt.AltModifier) {
                   root.openUrl(item.url)
                 } else {
-                  root.copyField(item.id, "password", item.title)
+                  root.copyField(item.id, root.defaultAction, item.title)
                 }
               }
             }
@@ -579,6 +594,16 @@ BarWidget {
                 ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.06)
                 : "transparent"
 
+            // Row click area placed behind action buttons
+            MouseArea {
+              id: itemMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onEntered: root.selectedIndex = index
+              onClicked: root.copyField(modelData.id, root.defaultAction, modelData.title)
+            }
+
             RowLayout {
               anchors.fill: parent
               anchors.leftMargin: Style.space(8)
@@ -621,8 +646,9 @@ BarWidget {
                 }
               }
 
-              // Action buttons visible on hover or selection
+              // Action buttons on top of itemMouse (higher Z)
               Row {
+                z: 10
                 spacing: Style.space(4)
                 visible: isSelected || itemMouse.containsMouse
 
@@ -724,16 +750,6 @@ BarWidget {
                 }
               }
             }
-
-            MouseArea {
-              id: itemMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              propagateComposedEvents: true
-              onEntered: root.selectedIndex = index
-              onClicked: root.copyField(modelData.id, "password", modelData.title)
-            }
           }
         }
 
@@ -742,11 +758,12 @@ BarWidget {
           visible: root.items.length === 0 && !root.busy
           Layout.fillWidth: true
           Layout.fillHeight: true
-          alignment: Qt.AlignCenter
           spacing: Style.space(6)
 
+          Item { Layout.fillHeight: true }
+
           Text {
-            Layout.alignment: Qt.AlignCenter
+            Layout.alignment: Qt.AlignHCenter
             text: "󰅖"
             font.family: root.fontFamily
             font.pixelSize: Style.space(32)
@@ -754,19 +771,21 @@ BarWidget {
           }
 
           Text {
-            Layout.alignment: Qt.AlignCenter
+            Layout.alignment: Qt.AlignHCenter
             text: root.searchQuery ? "No matching items found" : "No items in vault"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
           }
+
+          Item { Layout.fillHeight: true }
         }
 
         // ------------------ FOOTER HINT
         RowLayout {
           Layout.fillWidth: true
           Text {
-            text: "󰌑 Enter: Password  ·  󰘶 Shift+Enter: User  ·  󰘵 Ctrl+Enter: OTP"
+            text: "󰌑 Enter: " + root.defaultAction + "  ·  󰘶 Shift+Enter: User  ·  󰘵 Ctrl+Enter: OTP"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
