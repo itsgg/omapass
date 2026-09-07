@@ -9,7 +9,7 @@ Features:
 - Keeps non-sensitive vault item metadata (IDs, titles, usernames, categories) in fast memory cache
 - Ultra-responsive in-memory fuzzy search (<1ms)
 - Fetches secrets (passwords, TOTPs, secure notes) only on-demand
-- Pipes credentials directly to wl-copy with token-owned automatic clipboard wipe timer
+- Pipes credentials directly to wl-copy with serialized token ownership for automatic clipboard wipe
 - Preserves intentional whitespace in credentials
 - Optional autotype into active Wayland window via wtype
 - Supports direct CLI invocations for easy testing and terminal usage
@@ -61,6 +61,10 @@ def startup_lock_path() -> pathlib.Path:
     return runtime_dir() / "omapass-startup.lock"
 
 
+def clipboard_lock_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-clipboard.lock"
+
+
 def wipe_pid_path() -> pathlib.Path:
     return runtime_dir() / "omapass-wipe.pid"
 
@@ -96,17 +100,32 @@ def cancel_previous_wipe() -> None:
 
 
 def wipe_clipboard_now() -> None:
-    """Immediately clears the clipboard and invalidates any scheduled wipe."""
-    cancel_previous_wipe()
+    """Immediately clears the clipboard and invalidates any scheduled wipe under clipboard lock."""
+    clp = clipboard_lock_path()
     try:
-        subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
+        with open(clp, "w") as clf:
+            os.chmod(clp, 0o600)
+            fcntl.flock(clf, fcntl.LOCK_EX)
+            try:
+                cancel_previous_wipe()
+                subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
+            finally:
+                try:
+                    fcntl.flock(clf, fcntl.LOCK_UN)
+                except OSError:
+                    pass
     except Exception:
-        pass
+        cancel_previous_wipe()
+        try:
+            subprocess.run(["wl-copy", "--clear"], timeout=2.0, check=False)
+        except Exception:
+            pass
 
 
 class OmaPassService:
     def __init__(self):
         self.lock = threading.RLock()
+        self.clipboard_lock = threading.Lock()
         self.items: List[Dict[str, Any]] = []
         self.last_sync_time: float = 0
         self._load_cache()
@@ -183,7 +202,6 @@ class OmaPassService:
                     url = ""
                     user_id = ""
 
-                # If unlocked but cache is empty, trigger a background sync
                 if not self.items:
                     threading.Thread(target=self.sync, daemon=True).start()
 
@@ -451,72 +469,78 @@ class OmaPassService:
         title: str = "",
         timeout_seconds: int = DEFAULT_CLIPBOARD_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Fetches field, writes to wl-copy, coordinates ownership token to prevent premature wiping, and notifies."""
+        """Fetches field, writes to wl-copy, and serializes token/timer publication under flock."""
         ok, value = self.fetch_field(item_id, field)
         if not ok:
             return {"ok": False, "error": value}
 
-        # Pipe to wl-copy and verify successful exit code before modifying wipe schedule
-        try:
-            proc = subprocess.Popen(
-                ["wl-copy"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate(input=value.encode("utf-8"), timeout=2.0)
-            if proc.returncode != 0:
-                return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
-        except Exception as e:
-            return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
-
-        # Successful clipboard replacement: kill old wipe process if still running
-        wp = wipe_pid_path()
-        if wp.exists():
-            try:
-                old_pid = int(wp.read_text().strip())
-                os.kill(old_pid, signal.SIGTERM)
-            except (OSError, ValueError):
-                pass
-            try:
-                wp.unlink()
-            except OSError:
-                pass
-
-        tp = token_path()
-        # For sensitive fields (password, otp), generate an exclusive token matching this copy
-        if field in ("password", "otp") and timeout_seconds > 0:
-            token = f"{time.time()}-{os.getpid()}"
-            temp_tp = tp.with_suffix(".tmp")
-            temp_tp.write_text(token)
-            os.chmod(temp_tp, 0o600)
-            temp_tp.replace(tp)
-
-            # Timer only clears if current token on disk still matches this operation's token
-            cmd = (
-                f"sleep {int(timeout_seconds)} && "
-                f"[ \"$(cat '{tp}' 2>/dev/null)\" = '{token}' ] && "
-                f"wl-copy --clear && rm -f '{tp}' '{wp}'"
-            )
-            try:
-                wipe_proc = subprocess.Popen(
-                    ["bash", "-c", cmd],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                )
-                wp.write_text(str(wipe_proc.pid))
-                os.chmod(wp, 0o600)
-            except Exception:
-                pass
-        else:
-            # For non-sensitive credentials (e.g. username), invalidate any active wipe token
-            if tp.exists():
+        clp = clipboard_lock_path()
+        with self.clipboard_lock:
+            with open(clp, "w") as clf:
+                os.chmod(clp, 0o600)
+                fcntl.flock(clf, fcntl.LOCK_EX)
                 try:
-                    tp.unlink()
-                except OSError:
-                    pass
+                    # Pipe to wl-copy and verify exit code before modifying wipe token/timers
+                    proc = subprocess.Popen(
+                        ["wl-copy"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    proc.communicate(input=value.encode("utf-8"), timeout=2.0)
+                    if proc.returncode != 0:
+                        return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
+
+                    # Kill previous wipe process if running
+                    wp = wipe_pid_path()
+                    if wp.exists():
+                        try:
+                            old_pid = int(wp.read_text().strip())
+                            os.kill(old_pid, signal.SIGTERM)
+                        except (OSError, ValueError):
+                            pass
+                        try:
+                            wp.unlink()
+                        except OSError:
+                            pass
+
+                    tp = token_path()
+                    # For sensitive fields (password, otp), generate an exclusive token matching this copy
+                    if field in ("password", "otp") and timeout_seconds > 0:
+                        token = f"{time.time()}-{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
+                        unique_tmp = tp.parent / f"omapass-token.{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}.tmp"
+                        unique_tmp.write_text(token)
+                        os.chmod(unique_tmp, 0o600)
+                        unique_tmp.replace(tp)
+
+                        cmd = (
+                            f"sleep {int(timeout_seconds)} && "
+                            f"[ \"$(cat '{tp}' 2>/dev/null)\" = '{token}' ] && "
+                            f"wl-copy --clear && rm -f '{tp}' '{wp}'"
+                        )
+                        try:
+                            wipe_proc = subprocess.Popen(
+                                ["bash", "-c", cmd],
+                                start_new_session=True,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL,
+                            )
+                            wp.write_text(str(wipe_proc.pid))
+                            os.chmod(wp, 0o600)
+                        except Exception:
+                            pass
+                    else:
+                        if tp.exists():
+                            try:
+                                tp.unlink()
+                            except OSError:
+                                pass
+                finally:
+                    try:
+                        fcntl.flock(clf, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
 
         # Desktop notification
         label = "One-Time Password (TOTP)" if field == "otp" else field.capitalize()
