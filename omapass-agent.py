@@ -5,16 +5,18 @@ OmaPass Agent - Secret-isolating, high-performance backend helper for 1Password 
 Features:
 - Connects to 1Password CLI (op) and desktop daemon
 - Auto-spawns persistent background daemon listening on secure Unix domain socket ($XDG_RUNTIME_DIR/omapass.sock)
+- Mutex-protected daemon lifetime and serialized startup locks (fcntl.flock)
 - Keeps non-sensitive vault item metadata (IDs, titles, usernames, categories) in fast memory cache
 - Ultra-responsive in-memory fuzzy search (<1ms)
 - Fetches secrets (passwords, TOTPs, secure notes) only on-demand
-- Pipes credentials directly to wl-copy with process-independent automatic clipboard wipe timer
+- Pipes credentials directly to wl-copy with cancellable, process-independent automatic clipboard wipe timer
 - Preserves intentional whitespace in credentials
 - Optional autotype into active Wayland window via wtype
 - Supports direct CLI invocations for easy testing and terminal usage
 """
 
 import argparse
+import fcntl
 import json
 import os
 import pathlib
@@ -51,8 +53,36 @@ def cache_path() -> pathlib.Path:
     return runtime_dir() / "omapass-cache.json"
 
 
-def lockfile_path() -> pathlib.Path:
-    return runtime_dir() / "omapass.lock"
+def daemon_lock_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-daemon.lock"
+
+
+def startup_lock_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-startup.lock"
+
+
+def wipe_pid_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-wipe.pid"
+
+
+def cancel_previous_wipe() -> None:
+    """Terminates any previously running clipboard wipe subshell and cleans up PID file."""
+    wp = wipe_pid_path()
+    if wp.exists():
+        try:
+            pid_str = wp.read_text().strip()
+            if pid_str.isdigit():
+                old_pid = int(pid_str)
+                # Terminate the background sleep/wipe subshell
+                os.kill(old_pid, signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                if wp.exists():
+                    wp.unlink()
+            except OSError:
+                pass
 
 
 class OmaPassService:
@@ -60,7 +90,6 @@ class OmaPassService:
         self.lock = threading.RLock()
         self.items: List[Dict[str, Any]] = []
         self.last_sync_time: float = 0
-        self.clipboard_timer: Optional[threading.Timer] = None
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -199,7 +228,7 @@ class OmaPassService:
 
         if term:
             try:
-                cmd = f"op signin && sleep 1"
+                cmd = "op signin && sleep 1"
                 subprocess.Popen(
                     [term, "-e", "bash", "-c", cmd],
                     start_new_session=True,
@@ -213,7 +242,8 @@ class OmaPassService:
         return {"ok": False, "error": "Could not launch unlock prompt."}
 
     def lock_vault(self) -> Dict[str, Any]:
-        """Locks 1Password and clears metadata cache."""
+        """Locks 1Password, cancels clipboard wipe, and clears metadata cache."""
+        cancel_previous_wipe()
         with self.lock:
             self._clear_cache()
 
@@ -387,7 +417,7 @@ class OmaPassService:
                 timeout=8.0,
             )
             if res.returncode == 0:
-                # Strip only the trailing newline(s) added by the CLI, preserving user whitespace
+                # Strip only trailing line-endings, preserving deliberate user whitespace
                 raw_val = res.stdout.removesuffix("\r\n").removesuffix("\n")
                 return True, raw_val
             else:
@@ -405,10 +435,13 @@ class OmaPassService:
         title: str = "",
         timeout_seconds: int = DEFAULT_CLIPBOARD_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Fetches field, pipes directly to wl-copy, schedules auto-wipe, and notifies."""
+        """Fetches field, cancels any previous wipe, pipes to wl-copy, schedules wipe, and notifies."""
         ok, value = self.fetch_field(item_id, field)
         if not ok:
             return {"ok": False, "error": value}
+
+        # Cancel any obsolete clipboard wipe from an earlier copy operation
+        cancel_previous_wipe()
 
         try:
             proc = subprocess.Popen(
@@ -421,18 +454,23 @@ class OmaPassService:
         except Exception as e:
             return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
-        # Schedule automatic clipboard wipe.
-        # To guarantee survival even if this process or thread terminates,
-        # we spawn an independent detached sleep subshell:
+        # Schedule automatic clipboard wipe only for sensitive fields (password, otp)
         if field in ("password", "otp") and timeout_seconds > 0:
+            wp = wipe_pid_path()
             try:
-                subprocess.Popen(
-                    ["bash", "-c", f"sleep {int(timeout_seconds)} && wl-copy --clear"],
+                wipe_proc = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        f"sleep {int(timeout_seconds)} && wl-copy --clear && rm -f '{wp}'",
+                    ],
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
                 )
+                wp.write_text(str(wipe_proc.pid))
+                os.chmod(wp, 0o600)
             except Exception:
                 pass
 
@@ -557,33 +595,54 @@ def send_socket_request(request: Dict[str, Any], timeout: float = 3.0) -> Option
 
 
 def ensure_daemon() -> None:
-    """Ensures background daemon is running, spawning it if needed."""
-    if send_socket_request({"action": "ping"}, timeout=0.4) is not None:
+    """Ensures background daemon is running, using serialized file lock to prevent race conditions."""
+    if send_socket_request({"action": "ping"}, timeout=0.3) is not None:
         return
 
-    # Spawn daemon detached
-    script_path = pathlib.Path(__file__).resolve()
-    try:
-        subprocess.Popen(
-            [sys.executable, str(script_path), "serve"],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-        )
-        # Wait up to 1.5 seconds for socket initialization
-        for _ in range(15):
-            time.sleep(0.1)
-            if send_socket_request({"action": "ping"}, timeout=0.2) is not None:
-                break
-    except Exception:
-        pass
+    # Serialize startup across concurrent calls
+    slp = startup_lock_path()
+    with open(slp, "w") as sf:
+        os.chmod(slp, 0o600)
+        try:
+            fcntl.flock(sf, fcntl.LOCK_EX)
+            # Re-check under lock; another process may have just started the daemon
+            if send_socket_request({"action": "ping"}, timeout=0.3) is not None:
+                return
+
+            script_path = pathlib.Path(__file__).resolve()
+            subprocess.Popen(
+                [sys.executable, str(script_path), "serve"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            # Wait up to 1.5s for socket to become responsive
+            for _ in range(15):
+                time.sleep(0.1)
+                if send_socket_request({"action": "ping"}, timeout=0.2) is not None:
+                    break
+        finally:
+            try:
+                fcntl.flock(sf, fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 def run_daemon():
-    """Runs OmaPass background daemon listening on Unix domain socket."""
-    sp = socket_path()
+    """Runs OmaPass background daemon with an exclusive lifetime file lock."""
+    dlp = daemon_lock_path()
+    lock_file = open(dlp, "w")
+    os.chmod(dlp, 0o600)
 
+    try:
+        # Acquire non-blocking exclusive lock. If another daemon holds it, exit immediately.
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        # Daemon already running
+        sys.exit(0)
+
+    sp = socket_path()
     if sp.exists():
         try:
             sp.unlink()
@@ -626,6 +685,9 @@ def run_daemon():
             server.close()
             if sp.exists():
                 sp.unlink()
+            cancel_previous_wipe()
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
         except Exception:
             pass
         sys.exit(0)

@@ -99,5 +99,13 @@ class TestOmaPassService(unittest.TestCase):
         self.assertEqual(val, "  secret password with spaces  ")
 
 
+    def test_cancel_previous_wipe_cleans_file(self):
+        wp = agent.wipe_pid_path()
+        wp.write_text("999999999")
+        self.assertTrue(wp.exists())
+        agent.cancel_previous_wipe()
+        self.assertFalse(wp.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
