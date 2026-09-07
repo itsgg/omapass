@@ -129,6 +129,9 @@ class OmaPassService:
         self.clipboard_lock = threading.Lock()
         self.items: List[Dict[str, Any]] = []
         self.last_sync_time: float = 0
+        self.is_unlocked: bool = False
+        self.account_info: Dict[str, Any] = {}
+        self.last_status_check: float = 0
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -140,6 +143,10 @@ class OmaPassService:
                     data = json.load(f)
                     self.items = data.get("items", [])
                     self.last_sync_time = data.get("timestamp", 0)
+                    self.account_info = data.get("account_info", {})
+                    if self.items:
+                        self.is_unlocked = True
+                        self.last_status_check = time.time()
             except Exception:
                 self.items = []
 
@@ -151,6 +158,7 @@ class OmaPassService:
             payload = {
                 "timestamp": self.last_sync_time,
                 "items": self.items,
+                "account_info": self.account_info,
             }
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
@@ -164,6 +172,9 @@ class OmaPassService:
         with self.lock:
             self.items = []
             self.last_sync_time = 0
+            self.is_unlocked = False
+            self.account_info = {}
+            self.last_status_check = 0
             c = cache_path()
             if c.exists():
                 try:
@@ -174,8 +185,23 @@ class OmaPassService:
     def check_op_installed(self) -> bool:
         return shutil.which("op") is not None
 
-    def get_status(self) -> Dict[str, Any]:
-        """Checks 1Password CLI status and unlock state."""
+    def get_status(self, force: bool = False) -> Dict[str, Any]:
+        """Checks 1Password CLI status and unlock state with fast cache."""
+        now = time.time()
+        with self.lock:
+            if not force and self.is_unlocked and (now - self.last_status_check < 60.0):
+                return {
+                    "ok": True,
+                    "installed": True,
+                    "unlocked": True,
+                    "account": self.account_info.get("email", ""),
+                    "name": self.account_info.get("name", ""),
+                    "server": self.account_info.get("url", ""),
+                    "userId": self.account_info.get("user_id", ""),
+                    "itemCount": len(self.items),
+                    "lastSync": self.last_sync_time,
+                }
+
         if not self.check_op_installed():
             return {
                 "ok": False,
@@ -185,55 +211,97 @@ class OmaPassService:
             }
 
         try:
+            # Check status via `op user get --me` (1Password desktop app integration)
             res = subprocess.run(
-                ["op", "whoami", "--format=json"],
+                ["op", "user", "get", "--me", "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=2.0,
+                timeout=12.0,
             )
+            # Fallback for standalone CLI session tokens
+            if res.returncode != 0:
+                res = subprocess.run(
+                    ["op", "whoami", "--format=json"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=4.0,
+                )
+
             if res.returncode == 0:
                 try:
                     info = json.loads(res.stdout)
                     email = info.get("email", "")
                     url = info.get("url", "")
-                    user_id = info.get("user_id", "")
+                    user_id = info.get("id") or info.get("user_id", "")
+                    name = info.get("name", "")
                 except Exception:
                     email = res.stdout.strip()
                     url = ""
                     user_id = ""
+                    name = ""
 
-                if not self.items:
+                with self.lock:
+                    self.is_unlocked = True
+                    self.last_status_check = now
+                    self.account_info = {
+                        "email": email,
+                        "url": url,
+                        "user_id": user_id,
+                        "name": name,
+                    }
+                    has_items = bool(self.items)
+
+                if not has_items:
                     threading.Thread(target=self.sync, daemon=True).start()
 
-                return {
-                    "ok": True,
-                    "installed": True,
-                    "unlocked": True,
-                    "account": email,
-                    "server": url,
-                    "userId": user_id,
-                    "itemCount": len(self.items),
-                    "lastSync": self.last_sync_time,
-                }
+                with self.lock:
+                    return {
+                        "ok": True,
+                        "installed": True,
+                        "unlocked": True,
+                        "account": email,
+                        "name": name,
+                        "server": url,
+                        "userId": user_id,
+                        "itemCount": len(self.items),
+                        "lastSync": self.last_sync_time,
+                    }
             else:
+                with self.lock:
+                    self.is_unlocked = False
+                    self.last_status_check = now
+                    return {
+                        "ok": True,
+                        "installed": True,
+                        "unlocked": False,
+                        "itemCount": len(self.items),
+                        "lastSync": self.last_sync_time,
+                        "message": "Vault is locked or unauthorized.",
+                    }
+        except subprocess.TimeoutExpired:
+            with self.lock:
+                if self.is_unlocked and (now - self.last_status_check < 120.0):
+                    return {
+                        "ok": True,
+                        "installed": True,
+                        "unlocked": True,
+                        "account": self.account_info.get("email", ""),
+                        "name": self.account_info.get("name", ""),
+                        "server": self.account_info.get("url", ""),
+                        "userId": self.account_info.get("user_id", ""),
+                        "itemCount": len(self.items),
+                        "lastSync": self.last_sync_time,
+                    }
                 return {
                     "ok": True,
                     "installed": True,
                     "unlocked": False,
                     "itemCount": len(self.items),
                     "lastSync": self.last_sync_time,
-                    "message": "Vault is locked or unauthorized.",
+                    "message": "Status check timed out.",
                 }
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": True,
-                "installed": True,
-                "unlocked": False,
-                "itemCount": len(self.items),
-                "lastSync": self.last_sync_time,
-                "message": "Status check timed out.",
-            }
         except Exception as e:
             return {
                 "ok": False,
@@ -307,7 +375,7 @@ class OmaPassService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=12.0,
+                timeout=30.0,
             )
             if res.returncode != 0:
                 return {
@@ -350,6 +418,8 @@ class OmaPassService:
             with self.lock:
                 self.items = parsed
                 self.last_sync_time = time.time()
+                self.is_unlocked = True
+                self.last_status_check = time.time()
                 self._save_cache()
 
             return {"ok": True, "count": len(parsed)}
@@ -605,7 +675,8 @@ class OmaPassService:
         """Dispatches an RPC action request."""
         action = request.get("action", "")
         if action == "status":
-            return self.get_status()
+            force = bool(request.get("force", False))
+            return self.get_status(force=force)
         elif action == "unlock":
             return self.unlock()
         elif action == "lock":
@@ -636,7 +707,7 @@ class OmaPassService:
             return {"ok": False, "error": f"Unknown action '{action}'"}
 
 
-def send_socket_request(request: Dict[str, Any], timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Sends JSON request to daemon socket and returns JSON response."""
     sp = socket_path()
     if not sp.exists():
@@ -728,7 +799,7 @@ def run_daemon():
 
     def handle_client(conn: socket.socket):
         try:
-            conn.settimeout(15.0)
+            conn.settimeout(40.0)
             buffer = ""
             while True:
                 chunk = conn.recv(4096)
@@ -777,7 +848,8 @@ def handle_request(req: Dict[str, Any]):
     """Dispatches request via daemon socket, auto-starting daemon if needed, with structured error handling."""
     try:
         ensure_daemon()
-        resp = send_socket_request(req, timeout=8.0)
+        timeout = 35.0 if req.get("action") == "sync" else 10.0
+        resp = send_socket_request(req, timeout=timeout)
         if resp is not None:
             print(json.dumps(resp))
             return

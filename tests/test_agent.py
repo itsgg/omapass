@@ -116,6 +116,27 @@ class TestOmaPassService(unittest.TestCase):
             self.assertIn("error", res)
             self.assertIn("Failed to run wl-copy", res["error"])
 
+    @patch("subprocess.run")
+    def test_get_status_desktop_integration(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = '{"id": "USER123", "name": "Ganesh", "email": "me@example.com"}'
+        mock_run.return_value = mock_proc
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=True)
+            self.assertTrue(status["ok"])
+            self.assertTrue(status["unlocked"])
+            self.assertEqual(status["account"], "me@example.com")
+            self.assertEqual(status["name"], "Ganesh")
+
+            # Verify fast cache returns without subprocess call
+            mock_run.reset_mock()
+            cached_status = self.service.get_status(force=False)
+            self.assertTrue(cached_status["unlocked"])
+            mock_run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+

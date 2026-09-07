@@ -17,7 +17,7 @@ BarWidget {
   function open() {
     popupOpen = true
     checkStatus()
-    if (unlocked) refreshItems()
+    refreshItems()
   }
   function toggle() { popupOpen ? close() : open() }
   readonly property bool opened: popupOpen
@@ -50,6 +50,11 @@ BarWidget {
   readonly property color colBorder: Color.popups.border
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  Component.onCompleted: {
+    checkStatus()
+    refreshItems()
+  }
+
   // Status check process
   Process {
     id: statusProc
@@ -64,9 +69,9 @@ BarWidget {
           root.installed = resp.installed !== false
           var wasUnlocked = root.unlocked
           root.unlocked = !!resp.unlocked
-          root.account = resp.account || ""
+          root.account = resp.account || resp.name || ""
           if (resp.itemCount !== undefined) root.itemCount = resp.itemCount
-          if (!wasUnlocked && root.unlocked && root.popupOpen) {
+          if (!wasUnlocked && root.unlocked) {
             root.refreshItems()
           }
         } catch (e) {}
@@ -130,7 +135,6 @@ BarWidget {
         var completedAction = root.lastRunAction
         root.lastRunAction = ""
         checkStatus()
-        // If sync finished, reload the fresh items
         if (completedAction === "sync") {
           root.refreshItems()
         }
@@ -200,10 +204,10 @@ BarWidget {
     onTriggered: root.refreshItems()
   }
 
-  // Periodic status poll (slow when closed, faster when open)
+  // Periodic status poll (fast when open, gentle when closed)
   Timer {
     id: checkTimer
-    interval: root.popupOpen ? 2500 : 8000
+    interval: root.popupOpen ? 2500 : 15000
     running: true
     repeat: true
     onTriggered: root.checkStatus()
@@ -217,7 +221,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.unlocked ? "󰌆" : "󰌏"
+    text: root.unlocked ? "󰌆" : ""
     active: root.unlocked
     horizontalMargin: 7.5
     tooltipText: !root.installed
@@ -243,11 +247,15 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    contentWidth: popup.fittedContentWidth(Style.space(440))
-    contentHeight: popup.cappedContentHeight(Style.space(520))
+    contentWidth: popup.fittedContentWidth(Style.space(460))
+    contentHeight: root.unlocked
+      ? popup.cappedContentHeight(Style.space(520))
+      : popup.fittedContentHeight(lockedColumn.implicitHeight + Style.space(48))
 
     onOpenChanged: {
       if (open) {
+        root.checkStatus()
+        root.refreshItems()
         Qt.callLater(function() {
           if (root.unlocked) {
             searchInput.forceActiveFocus()
@@ -260,7 +268,7 @@ BarWidget {
 
     ColumnLayout {
       anchors.fill: parent
-      spacing: Style.space(8)
+      spacing: Style.space(10)
 
       // ========================================== HEADER
       RowLayout {
@@ -277,9 +285,9 @@ BarWidget {
 
         Rectangle {
           visible: root.unlocked && root.itemCount > 0
-          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.2)
-          radius: Style.space(8)
-          Layout.preferredHeight: Style.space(18)
+          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
+          radius: Style.space(9)
+          Layout.preferredHeight: Style.space(20)
           Layout.preferredWidth: countText.implicitWidth + Style.space(12)
 
           Text {
@@ -296,133 +304,99 @@ BarWidget {
         Item { Layout.fillWidth: true }
 
         // Sync button
-        Rectangle {
+        Button {
           visible: root.unlocked
-          width: Style.space(26)
-          height: Style.space(26)
-          radius: Style.space(6)
-          color: syncMouse.containsMouse ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1) : "transparent"
-
-          Text {
-            anchors.centerIn: parent
-            text: "󰑐"
-            color: root.busy ? root.colAccent : root.colDim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-
-          MouseArea {
-            id: syncMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.syncVault()
-          }
+          iconText: "󰑐"
+          tooltipText: "Sync vault"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: root.syncVault()
         }
 
-        // Lock / Unlock toggle button
-        Rectangle {
+        // Lock button
+        Button {
           visible: root.unlocked
-          width: Style.space(26)
-          height: Style.space(26)
-          radius: Style.space(6)
-          color: lockMouse.containsMouse ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1) : "transparent"
-
-          Text {
-            anchors.centerIn: parent
-            text: "󰌏"
-            color: root.colDim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-
-          MouseArea {
-            id: lockMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.lockVault()
-          }
+          iconText: ""
+          tooltipText: "Lock vault"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: root.lockVault()
         }
       }
 
       // ========================================== LOCKED STATE
       ColumnLayout {
+        id: lockedColumn
         visible: !root.unlocked
         Layout.fillWidth: true
-        Layout.fillHeight: true
-        spacing: Style.space(12)
-
-        Item { Layout.fillHeight: true }
-
-        Text {
-          Layout.alignment: Qt.AlignHCenter
-          text: "󰌏"
-          font.family: root.fontFamily
-          font.pixelSize: Style.space(48)
-          color: root.colDim
-        }
-
-        Text {
-          Layout.alignment: Qt.AlignHCenter
-          text: "1Password Vault Locked"
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-          color: root.colForeground
-        }
-
-        Text {
-          Layout.alignment: Qt.AlignHCenter
-          text: root.account ? root.account : "Unlock with fingerprint or master password"
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          color: root.colDim
-        }
+        spacing: Style.space(14)
 
         Item { Layout.preferredHeight: Style.space(8) }
 
+        // Centered lock icon badge
         Rectangle {
+          Layout.alignment: Qt.AlignHCenter
+          width: Style.space(56)
+          height: Style.space(56)
+          radius: Style.space(28)
+          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.12)
+          border.color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.3)
+          border.width: 1
+
+          Text {
+            anchors.centerIn: parent
+            text: ""
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(22)
+            color: root.colAccent
+          }
+        }
+
+        // Title and description
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(4)
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "1Password Vault Locked"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            font.bold: true
+            color: root.colForeground
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: root.account ? root.account : "Unlock with fingerprint or master password"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.colDim
+          }
+        }
+
+        Item { Layout.preferredHeight: Style.space(4) }
+
+        // Unlock Action Button
+        Button {
           id: unlockBtn
           Layout.alignment: Qt.AlignHCenter
-          Layout.preferredWidth: Style.space(160)
-          Layout.preferredHeight: Style.space(36)
-          radius: Style.space(8)
-          color: unlockMouse.containsMouse ? Qt.darker(root.colAccent, 1.15) : root.colAccent
-
-          Row {
-            anchors.centerIn: parent
-            spacing: Style.space(6)
-            Text {
-              text: "󰌆"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              color: Color.background
-              anchors.verticalCenter: parent.verticalCenter
-            }
-            Text {
-              text: "Unlock Vault"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-              color: Color.background
-              anchors.verticalCenter: parent.verticalCenter
-            }
-          }
-
-          MouseArea {
-            id: unlockMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.unlock()
-          }
-
+          text: "Unlock Vault"
+          iconText: ""
+          accent: root.colAccent
+          selected: true
+          bordered: true
+          focusable: true
+          horizontalPadding: Style.space(16)
+          verticalPadding: Style.space(8)
+          onClicked: root.unlock()
           Keys.onReturnPressed: root.unlock()
           Keys.onEnterPressed: root.unlock()
         }
 
-        Item { Layout.fillHeight: true }
+        Item { Layout.preferredHeight: Style.space(8) }
       }
 
       // ========================================== UNLOCKED STATE
@@ -433,19 +407,21 @@ BarWidget {
         spacing: Style.space(8)
 
         // ------------------ SEARCH FIELD
-        Rectangle {
+        BorderSurface {
+          id: searchBox
           Layout.fillWidth: true
-          Layout.preferredHeight: Style.space(34)
-          radius: Style.space(6)
-          color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.06)
-          border.color: searchInput.activeFocus ? root.colAccent : root.colBorder
-          border.width: searchInput.activeFocus ? 1.5 : 1
+          Layout.preferredHeight: Style.space(36)
+          radius: Style.cornerRadius
+          color: Style.controlFill(searchInput.activeFocus, searchBoxHover.hovered, root.colForeground, root.colAccent)
+          borderSpec: Border.controlSpec(searchInput.activeFocus ? "focus" : (searchBoxHover.hovered ? "hover-cursor" : "normal"), root.colForeground, root.colAccent)
+
+          HoverHandler { id: searchBoxHover }
 
           RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Style.space(8)
-            anchors.rightMargin: Style.space(8)
-            spacing: Style.space(6)
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            spacing: Style.space(8)
 
             Text {
               text: "󰍉"
@@ -465,14 +441,20 @@ BarWidget {
               onTextChanged: root.searchQuery = text
 
               Text {
-                text: "Search 1Password..."
+                text: "Search items, logins, tags..."
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 color: root.colDim
                 visible: !searchInput.text && !searchInput.inputMethodComposing
               }
 
-              Keys.onEscapePressed: root.close()
+              Keys.onEscapePressed: {
+                if (searchInput.text.length > 0) {
+                  searchInput.text = ""
+                } else {
+                  root.close()
+                }
+              }
               Keys.onDownPressed: {
                 if (root.items.length > 0) {
                   root.selectedIndex = (root.selectedIndex + 1) % root.items.length
@@ -507,9 +489,10 @@ BarWidget {
               text: "󰅖"
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
-              color: root.colDim
+              color: clearMouse.containsMouse ? root.colAccent : root.colDim
 
               MouseArea {
+                id: clearMouse
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
@@ -534,21 +517,23 @@ BarWidget {
               required property int index
 
               readonly property bool isSelected: root.selectedCategory === modelData.id
-              Layout.preferredHeight: Style.space(22)
-              Layout.preferredWidth: chipRow.implicitWidth + Style.space(12)
-              radius: Style.space(11)
+              Layout.preferredHeight: Style.space(24)
+              Layout.preferredWidth: chipRow.implicitWidth + Style.space(16)
+              radius: Style.cornerRadius
               color: isSelected
-                ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.25)
+                ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.22)
                 : chipMouse.containsMouse
                   ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
                   : "transparent"
-              border.color: isSelected ? root.colAccent : root.colBorder
+              border.color: isSelected
+                ? root.colAccent
+                : (chipMouse.containsMouse ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.2) : "transparent")
               border.width: 1
 
               Row {
                 id: chipRow
                 anchors.centerIn: parent
-                spacing: Style.space(4)
+                spacing: Style.space(5)
 
                 Text {
                   text: modelData.icon
@@ -575,6 +560,7 @@ BarWidget {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                   root.selectedCategory = modelData.id
+                  root.refreshItems()
                   searchInput.forceActiveFocus()
                 }
               }
@@ -583,223 +569,258 @@ BarWidget {
         }
 
         // ------------------ ITEMS LIST
-        ListView {
-          id: itemList
+        Item {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          clip: true
-          model: root.items
-          spacing: Style.space(2)
 
-          delegate: Rectangle {
-            required property var modelData
-            required property int index
+          ListView {
+            id: itemList
+            anchors.fill: parent
+            clip: true
+            visible: root.items.length > 0
+            model: root.items
+            spacing: Style.space(2)
 
-            readonly property bool isSelected: root.selectedIndex === index
-            width: itemList.width
-            height: Style.space(42)
-            radius: Style.space(6)
-            color: isSelected
-              ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
-              : itemMouse.containsMouse
-                ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.06)
-                : "transparent"
+            delegate: Rectangle {
+              required property var modelData
+              required property int index
 
-            // Row click area placed behind action buttons
-            MouseArea {
-              id: itemMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onEntered: root.selectedIndex = index
-              onClicked: root.copyField(modelData.id, root.defaultAction, modelData.title)
+              readonly property bool isSelected: root.selectedIndex === index
+              width: itemList.width
+              height: Style.space(46)
+              radius: Style.cornerRadius
+              color: isSelected
+                ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
+                : itemMouse.containsMouse
+                  ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.06)
+                  : "transparent"
+
+              MouseArea {
+                id: itemMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onEntered: root.selectedIndex = index
+                onClicked: root.copyField(modelData.id, root.defaultAction, modelData.title)
+              }
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(6)
+                spacing: Style.space(8)
+
+                // Category icon container
+                Rectangle {
+                  width: Style.space(28)
+                  height: Style.space(28)
+                  radius: Style.space(6)
+                  color: isSelected
+                    ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.25)
+                    : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.06)
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: Model.categoryIcon(modelData.category)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(14)
+                    color: isSelected ? root.colAccent : root.colForeground
+                  }
+                }
+
+                // Title and subtitle
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(1)
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: modelData.title || "Untitled"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: isSelected
+                    color: root.colForeground
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: Model.subtitleText(modelData)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: root.colDim
+                    elide: Text.ElideRight
+                    visible: text.length > 0
+                  }
+                }
+
+                // Quick Action Buttons
+                Row {
+                  z: 10
+                  spacing: Style.space(4)
+                  visible: isSelected || itemMouse.containsMouse
+
+                  // Copy Password
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.space(4)
+                    color: pwMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰌆"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: pwMouse.containsMouse ? Color.background : root.colForeground
+                    }
+
+                    MouseArea {
+                      id: pwMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.copyField(modelData.id, "password", modelData.title)
+                    }
+                  }
+
+                  // Copy Username
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.space(4)
+                    color: userMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰋽"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: userMouse.containsMouse ? Color.background : root.colForeground
+                    }
+
+                    MouseArea {
+                      id: userMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.copyField(modelData.id, "username", modelData.title)
+                    }
+                  }
+
+                  // Copy TOTP
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.space(4)
+                    color: otpMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰄬"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: otpMouse.containsMouse ? Color.background : root.colForeground
+                    }
+
+                    MouseArea {
+                      id: otpMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.copyField(modelData.id, "otp", modelData.title)
+                    }
+                  }
+
+                  // Open URL
+                  Rectangle {
+                    visible: !!modelData.url
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.space(4)
+                    color: urlMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰖟"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: urlMouse.containsMouse ? Color.background : root.colForeground
+                    }
+
+                    MouseArea {
+                      id: urlMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openUrl(modelData.url)
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // ------------------ EMPTY STATE
+          ColumnLayout {
+            anchors.centerIn: parent
+            visible: root.items.length === 0
+            spacing: Style.space(6)
+
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: root.busy ? "󰑐" : "󰍉"
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(32)
+              color: root.busy ? root.colAccent : root.colDim
             }
 
-            RowLayout {
-              anchors.fill: parent
-              anchors.leftMargin: Style.space(8)
-              anchors.rightMargin: Style.space(6)
-              spacing: Style.space(8)
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: root.busy ? "Syncing vault..." : (root.searchQuery ? "No matching items found" : "No items in vault")
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              color: root.colForeground
+            }
 
-              // Category icon
-              Text {
-                text: Model.categoryIcon(modelData.category)
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(16)
-                color: isSelected ? root.colAccent : root.colDim
-                Layout.preferredWidth: Style.space(20)
-                horizontalAlignment: Text.AlignHCenter
-              }
-
-              // Title and subtitle
-              ColumnLayout {
-                Layout.fillWidth: true
-                spacing: Style.space(1)
-
-                Text {
-                  Layout.fillWidth: true
-                  text: modelData.title || "Untitled"
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: isSelected
-                  color: root.colForeground
-                  elide: Text.ElideRight
-                }
-
-                Text {
-                  Layout.fillWidth: true
-                  text: Model.subtitleText(modelData)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  color: root.colDim
-                  elide: Text.ElideRight
-                  visible: text.length > 0
-                }
-              }
-
-              // Action buttons on top of itemMouse (higher Z)
-              Row {
-                z: 10
-                spacing: Style.space(4)
-                visible: isSelected || itemMouse.containsMouse
-
-                // Copy Password
-                Rectangle {
-                  width: Style.space(24)
-                  height: Style.space(24)
-                  radius: Style.space(4)
-                  color: pwMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
-
-                  Text {
-                    anchors.centerIn: parent
-                    text: "󰌆"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: pwMouse.containsMouse ? Color.background : root.colForeground
-                  }
-
-                  MouseArea {
-                    id: pwMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.copyField(modelData.id, "password", modelData.title)
-                  }
-                }
-
-                // Copy Username
-                Rectangle {
-                  width: Style.space(24)
-                  height: Style.space(24)
-                  radius: Style.space(4)
-                  color: userMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
-
-                  Text {
-                    anchors.centerIn: parent
-                    text: "󰋽"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: userMouse.containsMouse ? Color.background : root.colForeground
-                  }
-
-                  MouseArea {
-                    id: userMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.copyField(modelData.id, "username", modelData.title)
-                  }
-                }
-
-                // Copy TOTP
-                Rectangle {
-                  width: Style.space(24)
-                  height: Style.space(24)
-                  radius: Style.space(4)
-                  color: otpMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
-
-                  Text {
-                    anchors.centerIn: parent
-                    text: "󰄬"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: otpMouse.containsMouse ? Color.background : root.colForeground
-                  }
-
-                  MouseArea {
-                    id: otpMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.copyField(modelData.id, "otp", modelData.title)
-                  }
-                }
-
-                // Open URL
-                Rectangle {
-                  visible: !!modelData.url
-                  width: Style.space(24)
-                  height: Style.space(24)
-                  radius: Style.space(4)
-                  color: urlMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
-
-                  Text {
-                    anchors.centerIn: parent
-                    text: "󰖟"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    color: urlMouse.containsMouse ? Color.background : root.colForeground
-                  }
-
-                  MouseArea {
-                    id: urlMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.openUrl(modelData.url)
-                  }
-                }
-              }
+            Text {
+              visible: !root.busy && root.searchQuery.length > 0
+              Layout.alignment: Qt.AlignHCenter
+              text: "Try a different search query or category"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.colDim
             }
           }
         }
 
-        // ------------------ EMPTY STATE
-        ColumnLayout {
-          visible: root.items.length === 0 && !root.busy
+        // ------------------ FOOTER
+        Rectangle {
           Layout.fillWidth: true
-          Layout.fillHeight: true
-          spacing: Style.space(6)
-
-          Item { Layout.fillHeight: true }
-
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: "󰅖"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(32)
-            color: root.colDim
-          }
-
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: root.searchQuery ? "No matching items found" : "No items in vault"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            color: root.colDim
-          }
-
-          Item { Layout.fillHeight: true }
+          Layout.preferredHeight: 1
+          color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
         }
 
-        // ------------------ FOOTER HINT
         RowLayout {
           Layout.fillWidth: true
+          spacing: Style.space(4)
+
           Text {
-            text: "󰌑 Enter: " + root.defaultAction + "  ·  󰘶 Shift+Enter: User  ·  󰘵 Ctrl+Enter: OTP"
+            Layout.fillWidth: true
+            text: "↵ Password   ⇧↵ Username   ⌃↵ TOTP   ⌥↵ Open"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
+          }
+
+          Text {
+            visible: !!root.account
+            text: root.account
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.colDim
+            elide: Text.ElideMiddle
+            Layout.maximumWidth: Style.space(160)
           }
         }
       }
