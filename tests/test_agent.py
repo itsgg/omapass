@@ -129,12 +129,16 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     @patch("subprocess.Popen")
     def test_copy_to_clipboard_error_handling(self, mock_popen):
+        # shutil.which is patched too: without it this passes only on a machine
+        # that happens to have wl-copy, and takes the "not installed" branch
+        # everywhere else.
         mock_popen.side_effect = FileNotFoundError("wl-copy not found")
-        with patch.object(self.service, "fetch_field", return_value=(True, "secret123")):
-            res = self.service.copy_to_clipboard("item1", "password")
-            self.assertFalse(res["ok"])
-            self.assertIn("error", res)
-            self.assertIn("Failed to run wl-copy", res["error"])
+        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+            with patch.object(self.service, "fetch_field", return_value=(True, "secret123")):
+                res = self.service.copy_to_clipboard("item1", "password")
+                self.assertFalse(res["ok"])
+                self.assertIn("error", res)
+                self.assertIn("Failed to run wl-copy", res["error"])
 
     @patch("subprocess.run")
     def test_get_status_desktop_integration(self, mock_run):
