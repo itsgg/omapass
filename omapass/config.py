@@ -4,6 +4,8 @@ Kept apart from behaviour so the numbers that govern how long a secret lives
 are in one place and can be read without reading the daemon.
 """
 
+import re
+
 PLUGIN_ID = "gg.omapass"
 DEFAULT_CLIPBOARD_TIMEOUT = 30
 MAX_CLIPBOARD_TIMEOUT = 3600
@@ -47,3 +49,14 @@ DEFAULT_TOTP_PERIOD = 30
 # Schemes an item URL may be opened with. Everything else (file:, javascript:,
 # and friends) is refused rather than handed to xdg-open.
 ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+# What `op` is asked to generate when creating a login. The password is made
+# and stored by 1Password: it never passes through this helper.
+DEFAULT_PASSWORD_RECIPE = "letters,digits,symbols,32"
+
+# A recipe is passed to op as an argument, so it is checked against the shape
+# op documents rather than forwarded blindly.
+PASSWORD_RECIPE_RE = re.compile(
+    r"^(letters|digits|symbols)(,(letters|digits|symbols))*(,\d{1,3})?$|^\d{1,3}$"
+)

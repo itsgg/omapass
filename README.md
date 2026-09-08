@@ -25,6 +25,22 @@ Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates dir
 | ![Filtering as you type](docs/search.png) | ![The locked vault](docs/locked.png) |
 | Substring and subsequence search over titles, usernames, URLs and vaults. | Locked, until you say otherwise. |
 
+## Creating a login
+
+```bash
+./omapass-agent.py new "GitHub" --username octocat --url github.com
+```
+
+The password is produced by `op --generate-password` and stored directly in
+the vault. OmaPass never sees it, so it cannot leak one it does not hold.
+Title, username and URL are not secrets but are still your data, so they reach
+`op` in a 0600 template file rather than in a command line every process on
+the machine can read. Add `--dry-run` to have `op` validate without creating
+anything.
+
+This is the only write operation. Editing and deleting go through the
+1Password app, which the details view can open for the item you are looking at.
+
 ## Keyboard
 
 Everything is reachable without the mouse. The readline chords match the ones
@@ -184,6 +200,11 @@ The helper script `omapass-agent.py` can also be called directly:
 
 # Type a credential into the focused window (needs wtype)
 ./omapass-agent.py type <item-id> password
+
+# Create a login. 1Password generates and stores the password: it never
+# passes through OmaPass. --dry-run asks op to validate and create nothing.
+./omapass-agent.py new "GitHub" --username octocat --url github.com --dry-run
+./omapass-agent.py new "GitHub" --username octocat --url github.com
 
 # Any RPC action directly
 ./omapass-agent.py request '{"action": "status", "force": true}'

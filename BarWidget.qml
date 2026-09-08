@@ -27,13 +27,21 @@ BarWidget {
     refreshItems()
   }
 
+  // Releases the collector holding the last decrypted item.
+  //
+  // A StdioCollector keeps its buffer after streamFinished, and clearing
+  // `stdout` only disconnects it: the object stays parented to the Process
+  // with the plaintext still in it, so a per-request collector would pile up
+  // one decrypted item per view. It has to be destroyed explicitly.
+  function releaseDetailsCollector() {
+    var used = itemDetailsProc.stdout
+    itemDetailsProc.stdout = null
+    if (used) used.destroy()
+  }
+
   function forgetDetails() {
     itemDetailsProc.pendingItem = null
-    // A StdioCollector keeps its buffer after streamFinished, so the decrypted
-    // item would stay in the widget's memory after the popup closed. Dropping
-    // the collector is what actually releases it; the next request makes a new
-    // one.
-    itemDetailsProc.stdout = null
+    root.releaseDetailsCollector()
     root.itemDetails = null
     root.selectedItem = null
     root.detailsError = ""
@@ -583,6 +591,9 @@ BarWidget {
     itemDetailsProc.exitSeen = false
     itemDetailsProc.generation++
     itemDetailsProc.requestedId = String(item.id)
+    // Drop the previous one before making another, or each view leaves its
+    // decrypted item behind.
+    root.releaseDetailsCollector()
     itemDetailsProc.stdout = detailsCollector.createObject(itemDetailsProc)
     root.runHelper(itemDetailsProc, { action: "get_item", id: item.id })
   }
@@ -938,9 +949,10 @@ BarWidget {
     property int attempts: 0
     onTriggered: {
       attempts++
-      // The helper allows a 30s sync, so giving up at 8 ticks left the user
-      // looking at "No items in vault" while it was still running.
-      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 26) {
+      // The helper allows a 30s sync. Stopping at 26 ticks put the last
+      // request at exactly 30s, racing the completion it was waiting for;
+      // 32 ticks keeps polling a few seconds past it.
+      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 32) {
         running = false
         attempts = 0
         return
