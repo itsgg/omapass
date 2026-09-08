@@ -79,6 +79,10 @@ ShellRoot {
     id: "login1", title: "GitHub", category: "LOGIN", username: "itsgg",
     url: "https://github.com/login", vault: "Personal", favorite: true
   })
+  readonly property var noteItem: ({
+    id: "note1", title: "Recovery codes", category: "SECURE_NOTE", username: "",
+    url: "", vault: "Personal", favorite: false
+  })
   readonly property var longItem: ({
     id: "long1",
     title: "Very Long Item Title That Should Elide Rather Than Overflow The Card",
@@ -200,6 +204,16 @@ ShellRoot {
       widget.vaults = [{ id: "v1", name: "Personal" }]
       widget.startEdit()
     }
+    // The note has to arrive in the box. get_item lifts it out of `fields`
+    // into its own key, and an edit form that loads only `fields` saves an
+    // empty note over the real one.
+    if (harness.state === "details-edit-note") {
+      widget.selectedItem = harness.noteItem
+      widget.itemDetails = harness.detailsFixture("details-edit-note")
+      widget.currentView = "details"
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startEdit()
+    }
     if (harness.state === "details-delete") {
       widget.selectedItem = harness.loginItem
       widget.itemDetails = harness.detailsFixture("details")
@@ -299,6 +313,13 @@ ShellRoot {
     if (which === "details-totp") { base.totp = "123456"; base.hasTotp = true }
     if (which === "details-legacy") { base.totp = "123456" }
     if (which === "details-totp60") { base.totp = "654321"; base.hasTotp = true; base.totpPeriod = 60 }
+    if (which === "details-edit-note") {
+      base.category = "SECURE_NOTE"
+      base.title = "Recovery codes"
+      base.fields = []
+      base.urls = []
+      base.notes = "8fj2-kq91-ba7x\n2mn4-p0zz-vv13\nqq81-73ld-oe55"
+    }
     if (which === "details-notes") {
       base.notes = "A secure note that runs on for a while so the notes card has to scroll.\nSecond line.\nThird line.\nFourth line.\nFifth line."
     }

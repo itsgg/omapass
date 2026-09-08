@@ -32,6 +32,13 @@ ColumnLayout {
   property bool generatable: false
   property alias input: field
 
+  // Inert while a save is in flight. Ignoring the edits was not enough: the
+  // text kept accepting them, so what was on screen stopped matching what a
+  // retry would send. Disabling the row is what keeps the two the same.
+  property bool readOnly: false
+  enabled: !root.readOnly
+  opacity: root.readOnly ? 0.55 : 1.0
+
   Layout.fillWidth: true
   spacing: Style.space(3)
 

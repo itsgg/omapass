@@ -201,3 +201,80 @@ test("validation applies per category, not just to logins", () => {
   const note = M.createSpec("SECURE_NOTE");
   assert.ok(!M.hasErrors(M.validateCreate(note, { title: "N", notesPlain: "anything" })));
 });
+
+// submitFields is where an edit either keeps the user's data or loses it.
+// Each case below is a defect that shipped once.
+
+test("a create sends every field, since there is nothing to diff against", () => {
+  const spec = M.createSpec("LOGIN");
+  const got = plain(M.submitFields(spec, { title: "T", username: "u", password: "p" },
+                                   {}, "", false));
+  assert.deepEqual(Object.keys(got).sort(), ["password", "username"]);
+  assert.equal(got.username.value, "u");
+});
+
+test("title and url never travel as fields; they are op's own flags", () => {
+  const spec = M.createSpec("LOGIN");
+  const got = plain(M.submitFields(spec, { title: "T", url: "x.com" }, {}, "", false));
+  assert.ok(!("title" in got));
+  assert.ok(!("url" in got));
+});
+
+test("an edit sends only what changed", () => {
+  const spec = M.createSpec("LOGIN");
+  const originals = { title: "T", username: "octocat", password: "old" };
+  const values = { title: "T", username: "octocat", password: "new" };
+  const got = plain(M.submitFields(spec, values, originals, "", true));
+  assert.deepEqual(Object.keys(got), ["password"]);
+  assert.equal(got.password.value, "new");
+});
+
+test("an edit that changed nothing sends nothing", () => {
+  const spec = M.createSpec("LOGIN");
+  const same = { title: "T", username: "u", password: "p" };
+  assert.deepEqual(plain(M.submitFields(spec, same, same, "", true)), {});
+});
+
+test("a generated field is omitted, so op's own password is not raced", () => {
+  const spec = M.createSpec("LOGIN");
+  // The Generate toggle empties the box; sending that would clear the password.
+  const got = plain(M.submitFields(spec, { username: "u", password: "" },
+                                   { username: "u", password: "old" },
+                                   "password", true));
+  assert.deepEqual(Object.keys(got), []);
+});
+
+test("clearing a field is a change, not an absence", () => {
+  const spec = M.createSpec("LOGIN");
+  const got = plain(M.submitFields(spec, { username: "" }, { username: "u" }, "", true));
+  assert.equal(got.username.value, "");
+});
+
+test("a note is diffed like any other field", () => {
+  const spec = M.createSpec("SECURE_NOTE");
+  const originals = { title: "T", notesPlain: "the note" };
+  // Loading the note is what stops the save from erasing it.
+  assert.deepEqual(plain(M.submitFields(spec, originals, originals, "", true)), {});
+  const got = plain(M.submitFields(spec, { title: "T", notesPlain: "" }, originals, "", true));
+  assert.equal(got.notesPlain.value, "");
+});
+
+test("urlClearedByEdit fires only on an edit that empties a real website", () => {
+  assert.equal(M.urlClearedByEdit({ url: "" }, { url: "https://x.com" }, true), true);
+  assert.equal(M.urlClearedByEdit({ url: "" }, { url: "" }, true), false);
+  assert.equal(M.urlClearedByEdit({ url: "y.com" }, { url: "https://x.com" }, true), false);
+  // A create has no original to lose.
+  assert.equal(M.urlClearedByEdit({ url: "" }, { url: "https://x.com" }, false), false);
+});
+
+test("submitText sends a title or website only when the edit changed it", () => {
+  const originals = { title: "GitHub", url: "https://github.com" };
+  // Unchanged: empty tells the helper to leave it alone, rather than writing
+  // the form's minutes-old copy over whatever the vault holds now.
+  assert.equal(M.submitText(originals, originals, "title", true), "");
+  assert.equal(M.submitText(originals, originals, "url", true), "");
+  assert.equal(M.submitText({ title: "Gitea" }, originals, "title", true), "Gitea");
+  // A create has nothing to diff against, so everything is sent.
+  assert.equal(M.submitText(originals, {}, "title", false), "GitHub");
+  assert.equal(M.submitText({}, {}, "title", false), "");
+});

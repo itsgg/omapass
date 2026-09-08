@@ -17,8 +17,10 @@ BarWidget {
   function close() {
     popupOpen = false
     // Drop the decrypted item as soon as the popup goes away; there is no
-    // reason for a plaintext password to outlive the view showing it.
+    // reason for a plaintext password to outlive the view showing it. The
+    // form holds the same material once an edit has loaded it.
     forgetDetails()
+    forgetCreateForm()
   }
   function open() {
     root.currentView = "list"
@@ -397,6 +399,7 @@ BarWidget {
             // hide it: otherwise unlocking again redisplays the previous item,
             // reveal state and all, without fetching it.
             root.forgetDetails()
+            root.forgetCreateForm()
             root.items = []
             root.currentView = "list"
           }
@@ -752,6 +755,7 @@ BarWidget {
   // `omarchy-shell gg.omapass new`.
   function startCreate(title) {
     root.forgetDetails()
+    root.forgetCreateForm()
     root.currentView = "create"
     createForm.reset(title !== undefined ? title : root.searchQuery)
     createForm.vault = root.vaults.length > 0 ? root.vaults[0].name : ""
@@ -767,18 +771,34 @@ BarWidget {
   // Editing reuses the create form: the same spec decides which fields are
   // shown. The helper preserves everything the form does not show, so a
   // narrow form cannot cost the user their custom fields.
+  // The address the backend actually writes. op's --url sets the primary URL,
+  // so showing urls[0] meant that editing an item whose primary is not listed
+  // first quietly moved the primary to a different address.
+  function primaryUrlOf(d) {
+    var urls = (d && d.urls) ? d.urls : []
+    for (var i = 0; i < urls.length; i++) {
+      if (urls[i].primary) return urls[i].href || ""
+    }
+    return urls.length > 0 ? (urls[0].href || "") : ""
+  }
+
   function startEdit() {
     if (!root.itemDetails) return
     var d = root.itemDetails
+    root.forgetCreateForm()
     root.currentView = "create"
-    createForm.editingId = d.id
     createForm.category = String(d.category || "LOGIN").toUpperCase()
     var values = { title: d.title || "" }
     for (var i = 0; i < (d.fields || []).length; i++) {
       var f = d.fields[i]
       values[f.id] = f.value || ""
     }
-    if (d.urls && d.urls.length > 0) values.url = d.urls[0].href || ""
+    // get_item lifts the note out of `fields` into its own key. Loading only
+    // `fields` left the note box empty, and saving then wrote that emptiness
+    // back: editing the title of a secure note erased the note.
+    if (d.notes) values.notesPlain = d.notes
+    values.url = root.primaryUrlOf(d)
+    createForm.editingId = d.id
     createForm.loadValues(values)
     root.refreshVaults()
     Qt.callLater(function() { createForm.focusFirst() })
@@ -786,6 +806,8 @@ BarWidget {
 
   function submitEdit(payload) {
     if (root.creating) return
+    var id = createForm.editingId
+    if (!id) return
     root.creating = true
     createForm.submitError = ""
     createForm.busy = true
@@ -793,11 +815,15 @@ BarWidget {
     for (var k in payload.fields) changes[k] = payload.fields[k].value
     runAction({
       action: "edit_item",
-      id: createForm.editingId,
+      id: id,
       title: payload.title,
       url: payload.url,
+      // Carried through so Generate rotates the password. Dropping it left
+      // the form sending the empty box it had cleared, which set the
+      // password to nothing.
+      generateField: payload.generateField,
       changes: changes
-    }, "Saved " + payload.title)
+    }, "Saved " + (payload.displayTitle || payload.title))
   }
 
   // --- removing an item ----------------------------------------------------
@@ -808,6 +834,7 @@ BarWidget {
     if (!root.itemDetails) return
     root.pendingDeleteId = root.itemDetails.id
     root.pendingDeleteTitle = root.itemDetails.title || "this item"
+    deleteConfirm.selectedIndex = 0
     deleteConfirm.opened = true
   }
 
@@ -822,10 +849,33 @@ BarWidget {
               "Archived " + title)
   }
 
-  function cancelCreate() {
+  // Empties the form and forgets what it was editing.
+  //
+  // Called from every path that leaves the form, not just Cancel. The form
+  // holds whatever the user typed, and in an edit that is the item's own
+  // decrypted password, so it has no reason to outlive the view. Leaving
+  // `editingId` set was worse than untidy: the next press of + opened a
+  // create form that still carried it, and saving overwrote the item that
+  // had been edited before.
+  // Bumped every time the form is emptied. A save that finishes after the
+  // user has cancelled and started typing something else belongs to a form
+  // that no longer exists, and must not clear the one now on screen.
+  property int formSession: 0
+
+  function forgetCreateForm() {
+    root.formSession += 1
     root.creating = false
     createForm.editingId = ""
+    createForm.busy = false
+    createForm.submitError = ""
     createForm.reset("")
+  }
+
+  function cancelCreate() {
+    root.forgetCreateForm()
+    // Reached from the details view when editing, which still holds the
+    // decrypted item; going back to the list is not a reason to keep it.
+    root.forgetDetails()
     root.currentView = "list"
     Qt.callLater(function() { searchInput.forceActiveFocus() })
   }
@@ -869,6 +919,7 @@ BarWidget {
   }
 
   function backToList() {
+    root.forgetCreateForm()
     itemDetailsProc.pendingItem = null
     root.freshTotp = ""
     root.totpExpiresAt = 0
@@ -906,9 +957,14 @@ BarWidget {
       onStreamFinished: {
         var job = root.runningAction
         root.lastActionFailed = false
+        // Recorded on the job itself, not just in a property: finishAction
+        // runs from onExited, and it must not read the verdict of whichever
+        // action happened to run before this one.
+        if (job) job.answered = true
         try {
           var resp = JSON.parse(text)
           if (resp.ok) {
+            if (job) job.succeeded = true
             if (job && job.successToast) root.showToast(job.successToast)
           } else {
             root.lastActionFailed = true
@@ -957,6 +1013,30 @@ BarWidget {
     if (errorText) root.showToast(errorText)
 
     var completed = job.payload.action
+    if (completed === "create_item" || completed === "edit_item") {
+      // Only if the form on screen is still the one that submitted. Otherwise
+      // this is an older save landing under a draft the user has since
+      // started, and clearing it would throw that draft away.
+      if (job.formSession !== root.formSession) {
+        Qt.callLater(root.pumpActions)
+        return
+      }
+      // The form has to become usable again either way. Without this both
+      // `creating` and `busy` stayed true after the first attempt, and every
+      // later submit was dropped without a word.
+      root.creating = false
+      createForm.busy = false
+      if (job.answered === true && job.succeeded === true && !errorText) {
+        root.forgetCreateForm()
+        // An edit is reached from the details view, which still holds the
+        // item decrypted. Saving is not a reason to keep it resident.
+        root.forgetDetails()
+        root.currentView = "list"
+        Qt.callLater(function() {
+          if (root.unlocked) searchInput.forceActiveFocus()
+        })
+      }
+    }
     if (completed === "sync" || completed === "lock") {
       root.refreshItems()
     }
@@ -982,7 +1062,13 @@ BarWidget {
 
   function runAction(payload, successToast) {
     var queue = root.actionQueue
-    queue.push({ payload: payload, successToast: successToast || "" })
+    // Stamped with the form that was on screen when this was asked for, so a
+    // save landing late cannot act on a form the user has since replaced.
+    queue.push({
+      payload: payload,
+      successToast: successToast || "",
+      formSession: root.formSession
+    })
     root.actionQueue = queue
     root.pumpActions()
   }
@@ -999,6 +1085,7 @@ BarWidget {
     root.items = []
     root.currentView = "list"
     root.forgetDetails()
+    root.forgetCreateForm()
   }
 
   function syncVault() {
@@ -2379,8 +2466,16 @@ BarWidget {
       cancelText: "Keep"
       background: root.colSurface
       foreground: root.colForeground
+      // ConfirmDialog defaults selectedIndex to 1, which is the confirm
+      // button: as shipped, opening this and pressing Enter archived the item.
+      // Reset on every open, since Left/Right moves it.
+      selectedIndex: 0
       onConfirmed: root.confirmDelete()
-      onCanceled: root.pendingDeleteId = ""
+      onCanceled: {
+        root.pendingDeleteId = ""
+        root.pendingDeleteTitle = ""
+        deleteConfirm.opened = false
+      }
     }
 
   }

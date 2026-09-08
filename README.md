@@ -60,17 +60,47 @@ nothing. Generated is the default for that reason.
 
 From an item's details: **e** or the pencil to edit, **Del** or the bin to move
 it to the 1Password archive. Archiving is what the bin does, not deleting: it
-is recoverable from the app, and it asks first with **Keep** as the default.
+is recoverable from the app, and it asks first with **Keep** selected, so
+Enter on the confirmation keeps the item.
 
-The edit form shows the same fields the create form does, but the save is
-lossless. It reads op's own JSON for the item, changes only the fields you
-touched, and writes that back, so sections, custom fields and anything this
-plugin does not model survive untouched.
+The edit form shows the same fields the create form does, and the save names
+only the fields you actually changed. Nothing else about the item is sent, so
+sections, custom fields, passkeys and anything this plugin does not model are
+never in a position to be rewritten. Changing a title cannot touch a password,
+and a password rotated in the app since you opened the form is not pushed back
+to the stale copy on screen.
 
-One thing it refuses: an item carrying a passkey. 1Password's own
-documentation states that editing such an item through a JSON template
-overwrites the passkey, so OmaPass declines and points you at the app rather
-than destroying a credential.
+That comes from a deliberate choice between op's two ways of editing, which
+trade against each other:
+
+- A JSON template keeps values out of the command line, but 1Password
+  documents that a template does not carry passkeys and **overwrites the
+  passkey** when it writes. Its JSON does not reliably say which items carry
+  one, so this cannot be guarded against from outside.
+- An assignment statement names one field and leaves the rest alone, but
+  1Password warns that command arguments are visible to other processes on
+  your machine.
+
+OmaPass edits with assignment statements. A destroyed passkey is silent and
+permanent; the argument window is bounded, documented, and lasts as long as
+one `op` invocation. Rotating a password goes through `--generate-password`,
+so the common case puts no secret in an argument at all. A password you type
+into the edit form does travel that way, which is the cost of the item
+surviving intact.
+
+Every edit is previewed with `op item edit --dry-run` and the preview is read
+back before anything is written. The check is two-sided: every change asked
+for has to be present, and nothing else may differ. A preview that drops a
+field, adds one nobody asked for, ignores the change, quietly changes a field
+the edit never named, renames or retypes a field, moves one between sections,
+renames the item, drops a website, a section, an attachment or a passkey is
+refused and nothing is written. So is a preview that cannot be read at all, because an
+edit that cannot be checked is not one worth guessing at.
+
+Two things the edit form will not do, because op cannot: it cannot remove a
+website (`--url` has no empty form, so the form says so instead of silently
+doing nothing), and it cannot edit custom fields, which have no stable name to
+address safely. Both are one click away in the 1Password app.
 
 ## Keyboard
 

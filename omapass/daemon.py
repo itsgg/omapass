@@ -23,6 +23,7 @@ from .paths import (
     daemon_pid_path,
     entry_script,
     open_private,
+    runtime_dir,
     socket_path,
     write_private,
     startup_lock_path,
@@ -161,6 +162,24 @@ def ensure_daemon() -> None:
                 pass
 
 
+def sweep_orphaned_templates() -> None:
+    """Removes item templates a previous daemon died before deleting.
+
+    create_item unlinks its template in a finally block, but a SIGKILL, or a
+    SIGTERM landing between the write and the run, leaves the plaintext of an
+    item on disk. Only one daemon runs at a time and it holds an exclusive
+    lock, so by the time this runs no live template can exist.
+    """
+    try:
+        for stale in runtime_dir().glob("omapass-new.*.json"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def run_daemon(install_signals: bool = True, on_ready=None):
     """Runs OmaPass background daemon with an exclusive lifetime file lock.
 
@@ -185,6 +204,7 @@ def run_daemon(install_signals: bool = True, on_ready=None):
             pass
 
     write_private(daemon_pid_path(), str(os.getpid()))
+    sweep_orphaned_templates()
 
     service = OmaPassService()
 
@@ -274,7 +294,16 @@ def handle_request(req: Dict[str, Any]):
     try:
         ensure_daemon()
         action = req.get("action", "")
-        timeout = 40.0 if action in ("sync", "get_item", "unlock", "copy", "type") else 10.0
+        if action in ("create_item", "create_login", "edit_item", "delete_item"):
+            # A write can run op three times (read, preview, commit) at 25s
+            # each. The old 10s budget timed out on the client while the
+            # daemon went on writing, so the widget reported a failed save
+            # for an edit that had in fact landed.
+            timeout = 90.0
+        elif action in ("sync", "get_item", "unlock", "copy", "type"):
+            timeout = 40.0
+        else:
+            timeout = 10.0
         resp = send_socket_request(req, timeout=timeout)
         if resp is not None:
             print(json.dumps(resp))

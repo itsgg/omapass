@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import subprocess
@@ -47,6 +48,21 @@ from .paths import (
     wipe_pid_path,
     write_private,
 )
+
+def _digits(value: str) -> str:
+    """Just the digits, for comparing values op stores in its own format."""
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _sections(raw: Dict[str, Any]) -> Dict[str, str]:
+    return {str(sec.get("id", "")): str(sec.get("label", "") or "")
+            for sec in (raw.get("sections") or []) if isinstance(sec, dict)}
+
+
+def _url_labels(raw: Dict[str, Any]) -> Dict[str, str]:
+    return {str(u.get("href", "")): str(u.get("label", "") or "")
+            for u in (raw.get("urls") or []) if isinstance(u, dict) and u.get("href")}
+
 
 class OmaPassService:
     def __init__(self):
@@ -1141,6 +1157,8 @@ class OmaPassService:
         """Vault names and ids, for the picker on the create form."""
         if not self.check_op_installed():
             return {"ok": False, "error": "op CLI not installed"}
+        with self.lock:
+            epoch = self.lock_epoch
         try:
             res = subprocess.run(
                 ["op", "vault", "list", "--format=json"],
@@ -1165,7 +1183,10 @@ class OmaPassService:
             {"id": v.get("id", ""), "name": v.get("name", "")}
             for v in raw if isinstance(v, dict) and v.get("name")
         ]
-        self._note_op_success()
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return {"ok": False, "error": "Vault was locked during this request"}
+        self._note_op_success(epoch)
         return {"ok": True, "vaults": vaults}
 
     # How a spec's field type reaches op. These are 1Password's own type
@@ -1263,7 +1284,7 @@ class OmaPassService:
         with self.lock:
             epoch = self.lock_epoch
 
-        template_path = runtime_dir() / f"omapass-new.{os.getpid()}.json"
+        template_path = runtime_dir() / f"omapass-new.{os.getpid()}.{secrets.token_hex(8)}.json"
         try:
             write_private(template_path, json.dumps(template))
 
@@ -1388,15 +1409,216 @@ class OmaPassService:
                 return True
         return False
 
+    # Assignment statements name a field by its op id. Restricting an edit to
+    # 1Password's own built-in ids is what stops a statement from landing on a
+    # custom field that happens to share a label, and keeps the statement free
+    # of the "." and "[" that op reads as section and type markers.
+    EDITABLE_FIELD_IDS = frozenset({
+        "username", "password", "notesPlain",
+        "cardholder", "ccnum", "cvv", "expiry",
+    })
+
+    @staticmethod
+    def _field_values(raw: Dict[str, Any]) -> Dict[str, str]:
+        """Current value of every field in op's payload, by field id."""
+        out: Dict[str, str] = {}
+        for f in raw.get("fields", []) or []:
+            if isinstance(f, dict) and f.get("id"):
+                out[str(f["id"])] = "" if f.get("value") is None else str(f["value"])
+        return out
+
+    @staticmethod
+    def _primary_url(raw: Dict[str, Any]) -> str:
+        urls = raw.get("urls") or []
+        primary = next((u for u in urls if isinstance(u, dict) and u.get("primary")), None)
+        if primary is None:
+            primary = next((u for u in urls if isinstance(u, dict)), None)
+        return str((primary or {}).get("href", "") or "")
+
+    @staticmethod
+    def _field_meta(raw: Dict[str, Any]) -> Dict[str, Tuple[str, str, str]]:
+        """Type, label and section of every field, by field id.
+
+        An assignment given no type hint is meant to leave all three alone, so
+        any of them moving is op doing something other than what was asked.
+        """
+        out: Dict[str, Tuple[str, str, str]] = {}
+        for f in raw.get("fields", []) or []:
+            if not isinstance(f, dict) or not f.get("id"):
+                continue
+            sec = f.get("section")
+            sec_id = str(sec.get("id", "")) if isinstance(sec, dict) else ""
+            out[str(f["id"])] = (
+                str(f.get("type", "") or ""),
+                str(f.get("label", "") or ""),
+                sec_id,
+            )
+        return out
+
+    @staticmethod
+    def _file_ids(raw: Dict[str, Any]) -> List[str]:
+        """Attachment ids. op carries these on the item and can drop them."""
+        return [str(f.get("id", "")) for f in (raw.get("files") or [])
+                if isinstance(f, dict) and f.get("id")]
+
+    @staticmethod
+    def _url_hrefs(raw: Dict[str, Any]) -> List[str]:
+        return [str(u.get("href", "") or "") for u in (raw.get("urls") or [])
+                if isinstance(u, dict) and u.get("href")]
+
+    def _verify_edit_preview(
+        self,
+        before: Dict[str, Any],
+        preview: Dict[str, Any],
+        assigned: Dict[str, str],
+        generating: bool,
+        expect_title: str = "",
+        expect_url: str = "",
+    ) -> str:
+        """Checks op's --dry-run preview against what the edit was meant to do.
+
+        An assignment statement resolves a field name the way op chooses to,
+        and that resolution is not something this code can prove from outside.
+        Rather than assume it, the edit is previewed and the preview read back.
+
+        The check is deliberately two-sided. Every change asked for has to be
+        present, and, just as importantly, nothing else may differ: a preview
+        that applies the username and quietly empties the password or drops a
+        website is exactly the damage this edit exists to avoid, and checking
+        only the named fields would wave it through.
+
+        Returns "" when the preview is what was asked for, else the reason.
+        """
+        old = self._field_values(before)
+        new = self._field_values(preview)
+
+        dropped = sorted(set(old) - set(new))
+        if dropped:
+            return "1Password would drop " + ", ".join(dropped) + " from this item"
+
+        # Generation adds the password to an item that had none, and it is not
+        # in `assigned` precisely because op supplies the value.
+        allowed_new = set(assigned) | ({"password"} if generating else set())
+        unexpected = sorted(f for f in set(new) - set(old) if f not in allowed_new)
+        if unexpected:
+            return "1Password would add unexpected fields: " + ", ".join(unexpected)
+
+        old_meta = self._field_meta(before)
+        for field_id, wanted in assigned.items():
+            got = new.get(field_id, "")
+            if got == wanted:
+                continue
+            # op stores a month/year in its own canonical form, so "2028/12"
+            # comes back as "202812". Comparing the digits is what stops a
+            # perfectly good card expiry from being refused as unapplied.
+            declared = (old_meta.get(field_id) or ("", "", ""))[0].upper()
+            if declared == "MONTH_YEAR" and _digits(got) == _digits(wanted):
+                continue
+            return f"1Password did not apply the change to {field_id}"
+
+        # Everything the edit did not name has to come back exactly as it went
+        # in. op picks the generated password itself, so that one is checked
+        # for having changed rather than for a value we could predict.
+        for field_id, was in old.items():
+            if field_id in assigned:
+                continue
+            if generating and field_id == "password":
+                continue
+            if new.get(field_id, "") != was:
+                return f"1Password would change {field_id}, which this edit did not touch"
+
+        if generating:
+            fresh = new.get("password", "")
+            # Both halves matter: unchanged means op did nothing, and empty
+            # means it left the item with no password at all.
+            if not fresh or fresh == old.get("password", ""):
+                return "1Password did not generate a new password"
+
+        new_meta = self._field_meta(preview)
+        for field_id, was in old_meta.items():
+            now = new_meta.get(field_id)
+            if now is None or now == was:
+                continue
+            if now[0] != was[0]:
+                return f"1Password would change the type of {field_id}"
+            if now[2] != was[2]:
+                return f"1Password would move {field_id} to another section"
+            return f"1Password would rename the field {field_id}"
+
+        lost_files = [f for f in self._file_ids(before) if f not in self._file_ids(preview)]
+        if lost_files:
+            return "1Password would drop an attachment from this item"
+
+        want_title = expect_title or str(before.get("title", "") or "")
+        if str(preview.get("title", "") or "") != want_title:
+            return ("1Password did not apply the new title" if expect_title
+                    else "1Password would change the title this edit did not touch")
+
+        old_hrefs = self._url_hrefs(before)
+        new_hrefs = self._url_hrefs(preview)
+        old_primary = self._primary_url(before)
+        if expect_url:
+            if self._primary_url(preview) != expect_url:
+                return "1Password did not apply the new website"
+            # --url replaces the primary; every other address must survive it.
+            kept = [u for u in old_hrefs if u != old_primary]
+        else:
+            if self._primary_url(preview) != old_primary:
+                return "1Password would change the website this edit did not touch"
+            kept = old_hrefs
+        missing = [u for u in kept if u not in new_hrefs]
+        if missing:
+            return "1Password would drop the website " + missing[0]
+        new_labels = _url_labels(preview)
+        for href, label in _url_labels(before).items():
+            # The primary is the one --url replaces, so its label is op's to
+            # set; every other address has to come back exactly as it was.
+            if expect_url and href == old_primary:
+                continue
+            if href in new_labels and new_labels[href] != label:
+                return "1Password would rename the website " + href
+
+        old_sections = _sections(before)
+        new_sections = _sections(preview)
+        for sec_id, label in old_sections.items():
+            if sec_id not in new_sections:
+                return "1Password would drop a section from this item"
+            if new_sections[sec_id] != label:
+                return "1Password would rename a section on this item"
+
+        # Nothing here passes --tags, so op has no business changing them.
+        old_tags = sorted(str(t) for t in (before.get("tags") or []))
+        new_tags = sorted(str(t) for t in (preview.get("tags") or []))
+        if old_tags != new_tags:
+            return "1Password would change this item's tags"
+
+        if self._has_passkey(before) and not self._has_passkey(preview):
+            return "This edit would destroy the item's passkey"
+        return ""
+
     def edit_item(
         self,
         item_id: str = "",
         changes: Optional[Dict[str, Any]] = None,
         title: str = "",
         url: str = "",
+        generate_field: str = "",
+        password_recipe: str = DEFAULT_PASSWORD_RECIPE,
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """Edits named fields of an item, preserving everything it does not touch."""
+        """Edits named fields of an item using op's own assignment statements.
+
+        Deliberately not a JSON template. op documents that a template does not
+        carry passkeys and that editing a passkey item through one overwrites
+        the passkey, and its JSON omits enough that an item carrying one cannot
+        be recognised reliably from the outside. An assignment statement names
+        one field and leaves the rest of the item alone, which is the only form
+        of this edit that cannot cost the user data the form never showed them.
+
+        The price is 1Password's own warning that command arguments are visible
+        to other processes on the machine, so a generated password is left to
+        --generate-password and never reaches the argument list.
+        """
         if not self.check_op_installed():
             return {"ok": False, "error": "op CLI not installed"}
         if not item_id:
@@ -1405,80 +1627,101 @@ class OmaPassService:
         with self.lock:
             epoch = self.lock_epoch
 
+        edits = dict(changes or {})
+        unknown = sorted(set(edits) - self.EDITABLE_FIELD_IDS)
+        if unknown:
+            return {
+                "ok": False,
+                "error": "Cannot edit " + ", ".join(unknown) + " here; use the 1Password app",
+            }
+
+        generating = bool(generate_field)
+        if generating and generate_field != "password":
+            return {"ok": False, "error": f"Cannot generate '{generate_field}'"}
+        recipe = password_recipe or DEFAULT_PASSWORD_RECIPE
+        if generating and not PASSWORD_RECIPE_RE.match(recipe):
+            return {"ok": False, "error": f"Unsupported password recipe '{recipe}'"}
+        if generating:
+            # op supplies it; an assignment as well would just race it.
+            edits.pop("password", None)
+
+        normalized_url = fields.normalize_url(url) if url else ""
+        if url and not normalized_url:
+            return {"ok": False, "error": "Refusing to store a non-web URL"}
+
         ok, raw = self._raw_item(item_id)
         if not ok:
             return {"ok": False, "error": str(raw)}
 
-        if self._has_passkey(raw):
-            return {
-                "ok": False,
-                "error": "This item has a passkey. Editing it here would destroy it; "
-                         "use the 1Password app.",
-            }
-
-        edits = dict(changes or {})
-        normalized_url = fields.normalize_url(url) if url else None
-        if url and not normalized_url:
-            return {"ok": False, "error": "Refusing to store a non-web URL"}
-
-        touched = []
-        if title.strip() and title.strip() != raw.get("title", ""):
-            raw["title"] = title.strip()
-            touched.append("title")
-
-        # Only the fields the user actually changed are written; every other
-        # key in op's payload is carried through untouched.
-        existing = {str(f.get("id", "")): f for f in raw.get("fields", []) or []
-                    if isinstance(f, dict)}
+        current = self._field_values(raw)
+        assigned: Dict[str, str] = {}
         for field_id, value in edits.items():
             new_value = "" if value is None else str(value)
-            entry = existing.get(field_id)
-            if entry is None:
+            if current.get(field_id, "") == new_value:
                 continue
-            if str(entry.get("value", "")) == new_value:
+            if field_id not in current and not new_value:
+                # Blanking a field the item never had is not a change.
                 continue
-            entry["value"] = new_value
-            touched.append(field_id)
+            assigned[field_id] = new_value
 
-        if normalized_url:
-            urls = raw.get("urls") or []
-            primary = next((u for u in urls if isinstance(u, dict) and u.get("primary")), None)
-            if primary is None and urls:
-                primary = urls[0]
-            if primary is None:
-                raw["urls"] = [{"label": "website", "primary": True, "href": normalized_url}]
-                touched.append("url")
-            elif primary.get("href") != normalized_url:
-                primary["href"] = normalized_url
-                touched.append("url")
+        touched = sorted(assigned)
+        new_title = title.strip()
+        set_title = bool(new_title) and new_title != str(raw.get("title", ""))
+        if set_title:
+            touched.append("title")
+
+        current_url = self._primary_url(raw)
+        set_url = bool(normalized_url) and normalized_url != current_url
+        if set_url:
+            touched.append("url")
+        # An empty url means "not supplied", not "clear it": most categories
+        # have no website box at all. op's --url has no empty form, so the
+        # form refuses a real attempt to clear one before it gets here.
+
+        if generating:
+            touched.append("password")
 
         if not touched:
             return {"ok": True, "unchanged": True, "id": item_id}
 
-        template_path = runtime_dir() / f"omapass-edit.{os.getpid()}.json"
-        try:
-            write_private(template_path, json.dumps(raw))
-            cmd = ["op", "item", "edit", item_id, f"--template={template_path}", "--format=json"]
-            if dry_run:
-                cmd.append("--dry-run")
-            try:
-                res = subprocess.run(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=30.0,
-                )
-            except subprocess.TimeoutExpired:
-                return {"ok": False, "error": "Saving the item timed out"}
-            except Exception as e:
-                return {"ok": False, "error": str(e)}
-        finally:
-            try:
-                template_path.unlink()
-            except OSError:
-                pass
+        cmd = ["op", "item", "edit", item_id]
+        for field_id in sorted(assigned):
+            cmd.append(f"{field_id}={assigned[field_id]}")
+        if set_title:
+            cmd += ["--title", new_title]
+        if set_url:
+            cmd += ["--url", normalized_url]
+        if generating:
+            cmd.append(f"--generate-password={recipe}")
+        cmd.append("--format=json")
 
-        if res.returncode != 0:
-            self._note_op_error(res.stderr)
-            return {"ok": False, "error": res.stderr.strip() or "Failed to save the item"}
+        # Previewed before it is written, and the preview is checked: see
+        # _verify_edit_preview. A caller that only wanted a dry run stops here.
+        ok, preview = self._run_op_edit(cmd + ["--dry-run"])
+        if not ok:
+            return {"ok": False, "error": preview}
+        if not isinstance(preview, dict) or preview.get("fields") is None:
+            # Failing closed on purpose. An edit that cannot be checked is
+            # refused rather than written and hoped over: a refusal is
+            # visible and costs nothing, damage to an item is neither.
+            return {"ok": False,
+                    "error": "1Password returned no preview of this edit, so nothing was saved"}
+
+        reason = self._verify_edit_preview(
+            raw, preview, assigned, generating,
+            expect_title=new_title if set_title else "",
+            expect_url=normalized_url if set_url else "",
+        )
+        if reason:
+            return {"ok": False, "error": reason}
+
+        if dry_run:
+            return {"ok": True, "id": item_id, "changed": touched,
+                    "dryRun": True, "verified": True}
+
+        ok, result_or_err = self._run_op_edit(cmd)
+        if not ok:
+            return {"ok": False, "error": result_or_err}
 
         with self.lock:
             if epoch != self.lock_epoch:
@@ -1487,9 +1730,30 @@ class OmaPassService:
             self.item_details_cache.pop(item_id, None)
 
         self._note_op_success(epoch)
-        if not dry_run:
-            threading.Thread(target=self.sync, daemon=True).start()
-        return {"ok": True, "id": item_id, "changed": touched, "dryRun": dry_run}
+        threading.Thread(target=self.sync, daemon=True).start()
+        return {"ok": True, "id": item_id, "changed": touched,
+                "dryRun": False, "verified": True}
+
+    def _run_op_edit(self, cmd: List[str]) -> Tuple[bool, Any]:
+        """Runs one op item edit invocation, returning its parsed JSON."""
+        try:
+            res = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=25.0,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Saving the item timed out"
+        except Exception as e:
+            return False, str(e)
+
+        if res.returncode != 0:
+            self._note_op_error(res.stderr)
+            return False, res.stderr.strip() or "Failed to save the item"
+        try:
+            return True, json.loads(res.stdout)
+        except Exception:
+            # op did what it was asked; only the preview check is lost.
+            return True, {}
 
     def delete_item(self, item_id: str = "", archive: bool = True) -> Dict[str, Any]:
         """Archives an item, or deletes it outright when explicitly asked.
@@ -1632,14 +1896,17 @@ class OmaPassService:
                 changes=request.get("changes") or {},
                 title=str(request.get("title", "")),
                 url=str(request.get("url", "")),
+                generate_field=str(request.get("generateField", "")),
+                password_recipe=str(request.get("recipe", DEFAULT_PASSWORD_RECIPE)),
                 dry_run=bool(request.get("dryRun", False)),
             )
         elif action == "delete_item":
             return self.delete_item(
                 item_id=str(request.get("id", "")),
-                # Archiving unless the caller is explicit, so a missing flag
-                # can never mean permanent deletion.
-                archive=bool(request.get("archive", True)),
+                # Only the literal false asks for a permanent delete. bool()
+                # here would read a missing, null or 0 flag as permission to
+                # destroy the item, which is the one thing it must not mean.
+                archive=request.get("archive", True) is not False,
             )
         elif action == "open_desktop":
             item_id = request.get("id", "")

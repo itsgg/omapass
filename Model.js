@@ -292,6 +292,60 @@ function validateCreate(spec, values) {
   return errors;
 }
 
+// The fields a submit should actually send.
+//
+// Pulled out of the form so it can be tested: getting this wrong is how an
+// edit loses data. Three rules, and each one is a defect that happened.
+//
+//   - A field op is generating is omitted entirely. Sending a value alongside
+//     --generate-password races it, and sending the box the Generate toggle
+//     cleared sets the password to nothing.
+//   - An edit sends only what changed. Sending the whole form pushes the
+//     copy loaded minutes ago back over a password rotated since.
+//   - A create sends everything, because there is nothing to diff against.
+//
+// `originals` is empty for a create. Returns a map of field id to
+// { value, type }, which is what the helper's `changes` is built from.
+function submitFields(spec, values, originals, generateField, editing) {
+  var out = {};
+  var orig = originals || {};
+  for (var i = 0; i < spec.fields.length; i++) {
+    var f = spec.fields[i];
+    if (f.id === "title" || f.id === "url") continue;
+    if (generateField && f.id === generateField) continue;
+    var val = values[f.id] === undefined || values[f.id] === null ? "" : String(values[f.id]);
+    if (editing) {
+      var was = orig[f.id] === undefined || orig[f.id] === null ? "" : String(orig[f.id]);
+      if (val === was) continue;
+    }
+    out[f.id] = { value: val, type: f.type };
+  }
+  return out;
+}
+
+// The title or website a submit should send.
+//
+// Empty means "not supplied" to the helper, so an edit that did not touch
+// these sends nothing for them. Sending the form's copy regardless would
+// write a title minutes old back over one changed elsewhere since, which is
+// the same overwrite `submitFields` avoids for ordinary fields.
+function submitText(values, originals, key, editing) {
+  var now = values[key] === undefined || values[key] === null ? "" : String(values[key]);
+  if (!editing) return now;
+  var raw = (originals || {})[key];
+  var was = raw === undefined || raw === null ? "" : String(raw);
+  return now === was ? "" : now;
+}
+
+// op's --url can set a website but not remove one, so blanking the box would
+// do nothing at all. The form says so rather than swallowing it.
+function urlClearedByEdit(values, originals, editing) {
+  if (!editing) return false;
+  var was = (originals || {}).url;
+  var now = values.url;
+  return String(was || "").trim().length > 0 && String(now || "").trim().length === 0;
+}
+
 function hasErrors(errors) {
   for (var k in errors) { if (errors.hasOwnProperty(k)) return true; }
   return false;

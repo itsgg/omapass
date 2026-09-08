@@ -23,5 +23,6 @@ Two deviations in the copy it renders, both deliberate:
 States: `locked`, `locked-long`, `locked-none`, `list`, `long`, `many`,
 `empty`, `no-results`, `toast`, `details`, `details-totp`, `details-totp60`,
 `details-legacy`, `details-card`, `details-notes`, `details-many`,
-`details-error`, `details-loading`, and the `demo-*` states used to render the
+`details-error`, `details-loading`, `details-edit`, `details-edit-note`,
+`details-delete`, `create`, `create-card`, `create-note`, `create-empty`, and the `demo-*` states used to render the
 screenshots in the README.

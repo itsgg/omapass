@@ -13,7 +13,12 @@ PLUGIN_ID = "gg.omapass"
 # widget asking for an action it does not know about just gets "Unknown
 # action". The version is checked on every connect so a stale daemon is
 # replaced instead of quietly answering wrong.
-PROTOCOL_VERSION = 3
+#
+# 4: edit_item takes generateField and a recipe, and edits with assignment
+#    statements rather than a JSON template. A version 3 daemon left running
+#    across the upgrade would still edit through a template, which op
+#    documents as overwriting an item's passkey, so it has to be replaced.
+PROTOCOL_VERSION = 4
 DEFAULT_CLIPBOARD_TIMEOUT = 30
 MAX_CLIPBOARD_TIMEOUT = 3600
 

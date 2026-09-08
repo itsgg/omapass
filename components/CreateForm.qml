@@ -27,6 +27,9 @@ ColumnLayout {
   // Field id to value, and field id to message.
   property var values: ({})
   property var errors: ({})
+  // What the item held when the form opened. An edit sends the difference
+  // against this, never the whole form.
+  property var originalValues: ({})
   property bool generatePassword: true
 
   signal cancelled()
@@ -38,6 +41,10 @@ ColumnLayout {
   property alias firstField: fieldRepeater
 
   function selectCategory(id) {
+    // Inert while a save is in flight. The save carries the values as they
+    // were when it was submitted, so anything changed under it would be
+    // discarded when it lands, with nothing on screen to say so.
+    if (root.busy) return
     if (id === root.category) return
     var keepTitle = root.values.title || ""
     root.category = id
@@ -47,6 +54,9 @@ ColumnLayout {
 
   // Fills the form from an existing item.
   function loadValues(values) {
+    var original = {}
+    for (var k in values) original[k] = values[k]
+    root.originalValues = original
     root.values = values
     root.errors = ({})
     root.generatePassword = false
@@ -60,6 +70,7 @@ ColumnLayout {
     // common path, so the query becomes the title.
     if (title) v.title = title
     root.values = v
+    root.originalValues = ({})
     root.errors = ({})
     root.generatePassword = root.canGenerate
     root.submitError = ""
@@ -69,6 +80,7 @@ ColumnLayout {
   // reference back to a QML property notifies nothing, so the field would keep
   // showing an error the user had already corrected.
   function setValue(id, value) {
+    if (root.busy) return
     var next = {}
     for (var k in root.values) next[k] = root.values[k]
     next[id] = value
@@ -103,19 +115,25 @@ ColumnLayout {
       }
       return
     }
-    var payloadFields = ({})
-    for (var j = 0; j < root.spec.fields.length; j++) {
-      var f = root.spec.fields[j]
-      if (f.id === "title" || f.id === "url") continue
-      var val = root.values[f.id] || ""
-      if (root.canGenerate && f.id === root.generateField && root.generatePassword) val = ""
-      payloadFields[f.id] = { value: val, type: f.type }
+    if (Model.urlClearedByEdit(root.values, root.originalValues, root.editing)) {
+      var urlErr = {}
+      urlErr.url = "Removing a website needs the 1Password app"
+      root.errors = urlErr
+      return
     }
+
+    var generating = root.canGenerate && root.generatePassword
+    var payloadFields = Model.submitFields(
+      root.spec, root.values, root.originalValues,
+      generating ? root.generateField : "", root.editing)
     root.submitted({
       category: root.category,
-      title: root.values.title || "",
-      url: root.values.url || "",
+      title: Model.submitText(root.values, root.originalValues, "title", root.editing),
+      url: Model.submitText(root.values, root.originalValues, "url", root.editing),
       vault: root.vault,
+      // What to call the item in a toast. `title` above is empty when the
+      // title did not change, which is how the helper is told to leave it be.
+      displayTitle: root.values.title || "",
       generateField: root.canGenerate && root.generatePassword ? root.generateField : "",
       fields: payloadFields
     })
@@ -155,6 +173,8 @@ ColumnLayout {
       // so it comes first and reads as a choice rather than a setting.
       RowLayout {
         visible: !root.editing
+        enabled: !root.busy
+        opacity: root.busy ? 0.55 : 1.0
         Layout.fillWidth: true
         spacing: Style.space(4)
 
@@ -218,6 +238,7 @@ ColumnLayout {
 
           theme: root.theme
           spec: modelData
+          readOnly: root.busy
           value: root.values[modelData.id] || ""
           error: root.errors[modelData.id] || ""
           generated: root.generatePassword
@@ -237,6 +258,8 @@ ColumnLayout {
       // why. Editing cannot move an item between vaults, so it is not offered.
       ColumnLayout {
         visible: !root.editing
+        enabled: !root.busy
+        opacity: root.busy ? 0.55 : 1.0
         Layout.fillWidth: true
         spacing: Style.space(3)
 
