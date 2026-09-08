@@ -193,6 +193,11 @@ ShellRoot {
       }
     }
 
+    if (harness.state === "create-card" || harness.state === "create-note") {
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startCreate(harness.state === "create-card" ? "Acme Bank Visa" : "Recovery codes")
+      widget.setCreateCategory(harness.state === "create-card" ? "CREDIT_CARD" : "SECURE_NOTE")
+    }
     if (harness.state === "create") {
       widget.vaults = [{ id: "v1", name: "Personal" }, { id: "v2", name: "Work" }]
       widget.startCreate("GitHub")

@@ -179,6 +179,8 @@ function displayValue(field) {
 var CREATE_SPECS = {
   LOGIN: {
     label: "Login",
+    icon: "\u{f0306}",
+    generates: "password",
     fields: [
       { id: "title",    label: "Title",    type: "STRING",    required: true,
         placeholder: "GitHub" },
@@ -188,8 +190,63 @@ var CREATE_SPECS = {
       { id: "url",      label: "Website",  type: "URL",
         placeholder: "github.com" }
     ]
+  },
+  PASSWORD: {
+    label: "Password",
+    icon: "\u{f0306}",
+    generates: "password",
+    fields: [
+      { id: "title",    label: "Title",    type: "STRING",    required: true,
+        placeholder: "Router admin" },
+      { id: "password", label: "Password", type: "CONCEALED", generate: true },
+      { id: "url",      label: "Website",  type: "URL", placeholder: "192.168.1.1" }
+    ]
+  },
+  CREDIT_CARD: {
+    label: "Credit card",
+    icon: "\u{f092f}",
+    fields: [
+      { id: "title",      label: "Title",       type: "STRING", required: true,
+        placeholder: "Acme Bank Visa" },
+      { id: "cardholder", label: "Cardholder",  type: "STRING",
+        placeholder: "A N Other" },
+      { id: "ccnum",      label: "Card number", type: "CONCEALED",
+        placeholder: "4242 4242 4242 4242" },
+      { id: "expiry",     label: "Expiry",      type: "MONTH_YEAR",
+        placeholder: "202812" },
+      { id: "cvv",        label: "Security code (CVV)", type: "CONCEALED",
+        placeholder: "123" }
+    ]
+  },
+  SECURE_NOTE: {
+    label: "Secure note",
+    icon: "\u{f039e}",
+    fields: [
+      { id: "title",     label: "Title", type: "STRING", required: true,
+        placeholder: "Recovery codes" },
+      { id: "notesPlain", label: "Note", type: "MULTILINE",
+        placeholder: "Anything you want kept" }
+    ]
   }
 };
+
+// The order the category chooser offers them in.
+var CREATE_CATEGORIES = ["LOGIN", "PASSWORD", "CREDIT_CARD", "SECURE_NOTE"];
+
+function createCategories() {
+  var out = [];
+  for (var i = 0; i < CREATE_CATEGORIES.length; i++) {
+    var id = CREATE_CATEGORIES[i];
+    out.push({ id: id, label: CREATE_SPECS[id].label, icon: CREATE_SPECS[id].icon });
+  }
+  return out;
+}
+
+// Only some categories have a field 1Password can generate for us.
+function generatedFieldFor(category) {
+  var spec = createSpec(category);
+  return spec.generates || "";
+}
 
 function createSpec(category) {
   return CREATE_SPECS[String(category || "LOGIN").toUpperCase()] || CREATE_SPECS.LOGIN;
@@ -203,6 +260,7 @@ function inputKindFor(type) {
   case "URL":       return "url";
   case "EMAIL":     return "email";
   case "MONTH_YEAR": return "monthYear";
+  case "MULTILINE": return "multiline";
   case "MENU":      return "select";
   default:          return "text";
   }

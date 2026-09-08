@@ -90,6 +90,10 @@ def daemon_lock_path() -> pathlib.Path:
     return runtime_dir() / "omapass-daemon.lock"
 
 
+def daemon_pid_path() -> pathlib.Path:
+    return runtime_dir() / "omapass-daemon.pid"
+
+
 def startup_lock_path() -> pathlib.Path:
     return runtime_dir() / "omapass-startup.lock"
 

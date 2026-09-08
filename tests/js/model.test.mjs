@@ -165,3 +165,39 @@ test("looksLikeWebUrl matches the helper's own rule", () => {
     assert.ok(!M.looksLikeWebUrl(bad), bad);
   }
 });
+
+test("every offered category has a usable spec", () => {
+  for (const cat of plain(M.createCategories())) {
+    const spec = M.createSpec(cat.id);
+    assert.ok(spec.label, `${cat.id} has no label`);
+    assert.ok(spec.icon, `${cat.id} has no icon`);
+    const ids = plain(spec.fields.map((f) => f.id));
+    assert.ok(ids.includes("title"), `${cat.id} has no title field`);
+    assert.equal(spec.fields.filter((f) => f.required).length, 1,
+      `${cat.id} should require exactly the title`);
+    // Every field must map to a widget that exists.
+    for (const f of spec.fields) {
+      assert.ok(["text", "secret", "url", "email", "monthYear", "select", "multiline"]
+        .includes(M.inputKindFor(f.type)), `${cat.id}.${f.id}: ${f.type}`);
+    }
+  }
+});
+
+test("only the categories with a generatable field claim one", () => {
+  assert.equal(M.generatedFieldFor("LOGIN"), "password");
+  assert.equal(M.generatedFieldFor("PASSWORD"), "password");
+  // A card and a note have nothing 1Password can generate.
+  assert.equal(M.generatedFieldFor("CREDIT_CARD"), "");
+  assert.equal(M.generatedFieldFor("SECURE_NOTE"), "");
+});
+
+test("validation applies per category, not just to logins", () => {
+  const card = M.createSpec("CREDIT_CARD");
+  assert.ok(M.hasErrors(M.validateCreate(card, {})), "a card still needs a title");
+  assert.ok(M.hasErrors(M.validateCreate(card, { title: "V", expiry: "nope" })));
+  assert.ok(!M.hasErrors(M.validateCreate(card, { title: "V", expiry: "202812" })));
+  assert.ok(!M.hasErrors(M.validateCreate(card, { title: "V" })));
+
+  const note = M.createSpec("SECURE_NOTE");
+  assert.ok(!M.hasErrors(M.validateCreate(note, { title: "N", notesPlain: "anything" })));
+});

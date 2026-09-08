@@ -17,12 +17,14 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from .config import DETAILS_CACHE_TTL, MAX_REQUEST_BYTES
+from .config import DETAILS_CACHE_TTL, MAX_REQUEST_BYTES, PROTOCOL_VERSION
 from .paths import (
     daemon_lock_path,
+    daemon_pid_path,
     entry_script,
     open_private,
     socket_path,
+    write_private,
     startup_lock_path,
 )
 from .service import OmaPassService
@@ -57,10 +59,78 @@ def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optio
         sock.close()
 
 
+def running_daemon_version() -> Optional[int]:
+    """The protocol version of the daemon answering right now, if any."""
+    pong = send_socket_request({"action": "ping"}, timeout=0.5)
+    if pong is None:
+        return None
+    try:
+        return int(pong.get("version", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_our_daemon(pid: int) -> bool:
+    """True only for a process running this exact entry script as `serve`.
+
+    Matched on the full resolved script path, not a loose substring, and every
+    candidate is checked in /proc before anything is signalled.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return False
+    return str(entry_script()) in argv and "serve" in argv
+
+
+def _daemon_pid_from_file() -> Optional[int]:
+    try:
+        pid = int(daemon_pid_path().read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if _is_our_daemon(pid) else None
+
+
+def _daemon_pid_from_proc() -> Optional[int]:
+    """Fallback for a daemon old enough to predate the pid file."""
+    try:
+        candidates = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+    except OSError:
+        return None
+    for pid in candidates:
+        if pid != os.getpid() and _is_our_daemon(pid):
+            return pid
+    return None
+
+
+def stop_stale_daemon() -> None:
+    """Stops a daemon left over from an older version of the plugin.
+
+    Identified from its own lock file and checked against /proc before any
+    signal is sent, so a recycled pid cannot make this kill something else.
+    """
+    pid = _daemon_pid_from_file() or _daemon_pid_from_proc()
+    if pid is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(30):
+        time.sleep(0.1)
+        if not pathlib.Path(f"/proc/{pid}").exists():
+            break
+
+
 def ensure_daemon() -> None:
     """Ensures background daemon is running, using serialized file lock to prevent race conditions."""
-    if send_socket_request({"action": "ping"}, timeout=0.3) is not None:
+    version = running_daemon_version()
+    if version == PROTOCOL_VERSION:
         return
+    if version is not None:
+        # Serving, but from an older build of the plugin.
+        stop_stale_daemon()
 
     # Serialize startup across concurrent calls
     slp = startup_lock_path()
@@ -68,7 +138,7 @@ def ensure_daemon() -> None:
         try:
             fcntl.flock(sf, fcntl.LOCK_EX)
             # Re-check under lock; another process may have just started the daemon
-            if send_socket_request({"action": "ping"}, timeout=0.3) is not None:
+            if running_daemon_version() == PROTOCOL_VERSION:
                 return
 
             script_path = entry_script()
@@ -82,7 +152,7 @@ def ensure_daemon() -> None:
             # Wait up to 1.5s for socket to become responsive
             for _ in range(15):
                 time.sleep(0.1)
-                if send_socket_request({"action": "ping"}, timeout=0.2) is not None:
+                if running_daemon_version() is not None:
                     break
         finally:
             try:
@@ -113,6 +183,8 @@ def run_daemon(install_signals: bool = True, on_ready=None):
             sp.unlink()
         except OSError:
             pass
+
+    write_private(daemon_pid_path(), str(os.getpid()))
 
     service = OmaPassService()
 

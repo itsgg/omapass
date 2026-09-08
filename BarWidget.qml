@@ -759,6 +759,11 @@ BarWidget {
     Qt.callLater(function() { createForm.focusFirst() })
   }
 
+  // Used by the audit harness to render each category without a mouse.
+  function setCreateCategory(id) {
+    createForm.selectCategory(id)
+  }
+
   function cancelCreate() {
     root.creating = false
     createForm.reset("")
@@ -793,15 +798,15 @@ BarWidget {
     root.creating = true
     createForm.submitError = ""
     createForm.busy = true
-    var what = payload.title
     runAction({
-      action: "create_login",
+      action: "create_item",
+      category: payload.category,
       title: payload.title,
-      username: payload.username,
       url: payload.url,
       vault: payload.vault,
-      password: payload.password
-    }, "Created " + what)
+      generateField: payload.generateField,
+      fields: payload.fields
+    }, "Created " + payload.title)
   }
 
   function backToList() {
@@ -848,7 +853,7 @@ BarWidget {
             if (job && job.successToast) root.showToast(job.successToast)
           } else {
             root.lastActionFailed = true
-            if (job && job.payload.action === "create_login") {
+            if (job && job.payload.action === "create_item") {
               createForm.submitError = resp.error || "Could not create the item"
             }
             root.showToast(resp.error || "Action failed")
@@ -1806,7 +1811,7 @@ BarWidget {
 
           Text {
             Layout.fillWidth: true
-            text: "New login"
+            text: "New " + createForm.spec.label.toLowerCase()
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
@@ -1816,7 +1821,10 @@ BarWidget {
 
           Text {
             Layout.fillWidth: true
-            text: "1Password generates the password unless you type one"
+            // Only some categories have a field 1Password can generate.
+            text: createForm.canGenerate
+              ? "1Password generates the password unless you type one"
+              : "Stored in your vault, never on disk"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption - 1
             color: root.colDim
@@ -1833,6 +1841,8 @@ BarWidget {
         vaults: root.vaults
         focus: visible
         onVisibleChanged: if (visible) forceActiveFocus()
+        vaultsLoading: vaultsProc.running
+        onVaultsRequested: root.refreshVaults()
         onCancelled: root.cancelCreate()
         onSubmitted: function(payload) { root.submitCreate(payload) }
       }

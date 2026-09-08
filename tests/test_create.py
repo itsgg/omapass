@@ -166,6 +166,73 @@ class TestCreateLogin(IsolatedRuntimeDir):
                     res = self.service.create_login(title="X", password="p", password_recipe="junk")
         self.assertTrue(res["ok"])
 
+    def test_every_offered_category_can_be_created(self):
+        for category in ("LOGIN", "PASSWORD", "CREDIT_CARD", "SECURE_NOTE"):
+            with patch.object(self.service, "check_op_installed", return_value=True):
+                with patch("subprocess.run", return_value=MagicMock(
+                        returncode=0, stdout="{}", stderr="")) as run:
+                    with patch.object(self.service, "sync"):
+                        res = self.service.create_item(category=category, title="X")
+            self.assertTrue(res["ok"], category)
+            self.assertIn(category, " ".join(str(a) for a in run.call_args[0][0]) + category)
+
+    def test_an_unknown_category_is_refused(self):
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run") as run:
+                res = self.service.create_item(category="NUCLEAR_CODES", title="X")
+        self.assertFalse(res["ok"])
+        run.assert_not_called()
+
+    def test_card_fields_reach_op_in_the_template_not_argv(self):
+        seen = {}
+
+        def capture(cmd, *a, **k):
+            path = [c for c in cmd if c.startswith("--template=")][0].split("=", 1)[1]
+            seen["argv"] = cmd
+            with open(path) as fh:
+                seen["body"] = json.load(fh)
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", side_effect=capture):
+                with patch.object(self.service, "sync"):
+                    self.service.create_item(
+                        category="CREDIT_CARD", title="Acme",
+                        item_fields={
+                            "ccnum": {"value": "4242424242424242", "type": "CONCEALED"},
+                            "cvv": {"value": "123", "type": "CONCEALED"},
+                            "expiry": {"value": "202812", "type": "MONTH_YEAR"},
+                        })
+
+        joined = " ".join(seen["argv"])
+        self.assertNotIn("4242424242424242", joined)
+        self.assertNotIn("123", joined.replace("--template=", ""))
+        ids = {f["id"]: f for f in seen["body"]["fields"]}
+        self.assertEqual(ids["ccnum"]["value"], "4242424242424242")
+        self.assertEqual(ids["expiry"]["type"], "MONTH_YEAR")
+        # A card has nothing to generate.
+        self.assertFalse([a for a in seen["argv"] if a.startswith("--generate-password")])
+
+    def test_a_note_is_stored_with_the_notes_purpose(self):
+        seen = {}
+
+        def capture(cmd, *a, **k):
+            path = [c for c in cmd if c.startswith("--template=")][0].split("=", 1)[1]
+            with open(path) as fh:
+                seen["body"] = json.load(fh)
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", side_effect=capture):
+                with patch.object(self.service, "sync"):
+                    self.service.create_item(
+                        category="SECURE_NOTE", title="Codes",
+                        item_fields={"notesPlain": {"value": "a b c", "type": "MULTILINE"}})
+
+        note = [f for f in seen["body"]["fields"] if f["id"] == "notesPlain"][0]
+        self.assertEqual(note["purpose"], "NOTES")
+        self.assertEqual(note["type"], "STRING")
+
     def test_dispatch_routes_create_login(self):
         with patch.object(self.service, "create_login", return_value={"ok": True}) as c:
             self.service.dispatch({"action": "create_login", "title": "X", "dryRun": True})

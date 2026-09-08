@@ -7,6 +7,13 @@ are in one place and can be read without reading the daemon.
 import re
 
 PLUGIN_ID = "gg.omapass"
+
+# Bumped whenever the RPC surface changes. The daemon outlives a plugin
+# update: the shell reloads the QML, but the old helper keeps serving, and a
+# widget asking for an action it does not know about just gets "Unknown
+# action". The version is checked on every connect so a stale daemon is
+# replaced instead of quietly answering wrong.
+PROTOCOL_VERSION = 2
 DEFAULT_CLIPBOARD_TIMEOUT = 30
 MAX_CLIPBOARD_TIMEOUT = 3600
 

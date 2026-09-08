@@ -15,6 +15,9 @@ ColumnLayout {
   property var vaults: []
   property string vault: ""
   property bool busy: false
+  property bool vaultsLoading: false
+
+  signal vaultsRequested()
   property string submitError: ""
 
   // Field id to value, and field id to message.
@@ -26,7 +29,17 @@ ColumnLayout {
   signal submitted(var payload)
 
   readonly property var spec: Model.createSpec(root.category)
+  readonly property string generateField: Model.generatedFieldFor(root.category)
+  readonly property bool canGenerate: root.generateField.length > 0
   property alias firstField: fieldRepeater
+
+  function selectCategory(id) {
+    if (id === root.category) return
+    var keepTitle = root.values.title || ""
+    root.category = id
+    root.reset(keepTitle)
+    Qt.callLater(function() { root.focusFirst() })
+  }
 
   function reset(title) {
     var v = {}
@@ -36,7 +49,7 @@ ColumnLayout {
     if (title) v.title = title
     root.values = v
     root.errors = ({})
-    root.generatePassword = true
+    root.generatePassword = root.canGenerate
     root.submitError = ""
   }
 
@@ -78,12 +91,21 @@ ColumnLayout {
       }
       return
     }
+    var payloadFields = ({})
+    for (var j = 0; j < root.spec.fields.length; j++) {
+      var f = root.spec.fields[j]
+      if (f.id === "title" || f.id === "url") continue
+      var val = root.values[f.id] || ""
+      if (root.canGenerate && f.id === root.generateField && root.generatePassword) val = ""
+      payloadFields[f.id] = { value: val, type: f.type }
+    }
     root.submitted({
+      category: root.category,
       title: root.values.title || "",
-      username: root.values.username || "",
       url: root.values.url || "",
       vault: root.vault,
-      password: root.generatePassword ? "" : (root.values.password || "")
+      generateField: root.canGenerate && root.generatePassword ? root.generateField : "",
+      fields: payloadFields
     })
   }
 
@@ -117,6 +139,63 @@ ColumnLayout {
       width: parent.width
       spacing: Style.space(10)
 
+      // Category chooser. Which kind of item this is changes the whole form,
+      // so it comes first and reads as a choice rather than a setting.
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(4)
+
+        Repeater {
+          model: Model.createCategories()
+          delegate: Rectangle {
+            required property var modelData
+            readonly property bool isSelected: root.category === modelData.id
+
+            Layout.preferredHeight: Style.space(26)
+            Layout.preferredWidth: catRow.implicitWidth + Style.space(16)
+            radius: Style.cornerRadius
+            color: isSelected
+              ? Qt.rgba(root.theme.accent.r, root.theme.accent.g, root.theme.accent.b, 0.22)
+              : (catMouse.containsMouse
+                  ? Qt.rgba(root.theme.foreground.r, root.theme.foreground.g, root.theme.foreground.b, 0.08)
+                  : "transparent")
+            border.color: isSelected ? root.theme.accent : "transparent"
+            border.width: 1
+
+            Row {
+              id: catRow
+              anchors.centerIn: parent
+              spacing: Style.space(5)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.icon
+                font.family: root.theme.fontFamily
+                font.pixelSize: Style.font.caption
+                color: isSelected ? root.theme.accent : root.theme.dim
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.label
+                font.family: root.theme.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: isSelected
+                color: isSelected ? root.theme.accent : root.theme.foreground
+              }
+            }
+
+            MouseArea {
+              id: catMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.selectCategory(modelData.id)
+            }
+          }
+        }
+      }
+
       Repeater {
         id: fieldRepeater
         model: root.spec.fields
@@ -129,6 +208,7 @@ ColumnLayout {
           value: root.values[modelData.id] || ""
           error: root.errors[modelData.id] || ""
           generated: root.generatePassword
+          generatable: root.canGenerate && modelData.id === root.generateField
           onEdited: function(v) { root.setValue(modelData.id, v) }
           onGenerateToggled: function(g) {
             root.generatePassword = g
@@ -138,22 +218,47 @@ ColumnLayout {
         }
       }
 
-      // Vault picker. Which vault a credential lands in is a decision worth
-      // making explicitly, not defaulting silently.
+      // Vault picker. Which vault a credential lands in is worth deciding
+      // explicitly, so this is always shown: hiding it when the list could not
+      // be fetched left the user with no picker and no reason why.
       ColumnLayout {
-        visible: root.vaults.length > 0
         Layout.fillWidth: true
         spacing: Style.space(3)
 
-        Text {
-          text: "VAULT"
-          font.family: root.theme.fontFamily
-          font.pixelSize: Style.font.caption - 1
-          font.bold: true
-          color: root.theme.dim
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(6)
+
+          Text {
+            text: "VAULT"
+            font.family: root.theme.fontFamily
+            font.pixelSize: Style.font.caption - 1
+            font.bold: true
+            color: root.theme.dim
+          }
+
+          Item { Layout.fillWidth: true }
+
+          Text {
+            visible: root.vaults.length === 0
+            text: root.vaultsLoading ? "loading..." : "using your default vault"
+            font.family: root.theme.fontFamily
+            font.pixelSize: Style.font.caption - 1
+            color: root.theme.dim
+          }
+
+          Button {
+            visible: root.vaults.length === 0 && !root.vaultsLoading
+            text: "Retry"
+            accent: root.theme.accent
+            horizontalPadding: Style.space(8)
+            verticalPadding: Style.space(2)
+            onClicked: root.vaultsRequested()
+          }
         }
 
         Dropdown {
+          visible: root.vaults.length > 0
           Layout.fillWidth: true
           options: root.vaults.map(function(v) { return v.name })
           value: root.vault
@@ -161,6 +266,31 @@ ColumnLayout {
           accent: root.theme.accent
           fontFamily: root.theme.fontFamily
           onValueChanged: root.vault = value
+        }
+
+        // Stands in when the list is unavailable, so the row keeps its shape
+        // and the form still explains where the item will go.
+        BorderSurface {
+          visible: root.vaults.length === 0
+          Layout.fillWidth: true
+          Layout.preferredHeight: Style.spacing.controlHeight
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.theme.foreground.r, root.theme.foreground.g, root.theme.foreground.b, 0.04)
+          borderSpec: Border.controlSpec("normal", root.theme.foreground, root.theme.accent)
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - Style.spacing.controlPaddingX * 2
+            text: root.vaultsLoading
+              ? "Reading your vaults..."
+              : "1Password will use your default vault"
+            font.family: root.theme.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.theme.dim
+            elide: Text.ElideRight
+          }
         }
       }
 
@@ -205,7 +335,7 @@ ColumnLayout {
     }
 
     Button {
-      text: root.busy ? "Saving..." : "Create login"
+      text: root.busy ? "Saving..." : ("Create " + root.spec.label.toLowerCase())
       iconText: "\u{f0306}"
       accent: root.theme.accent
       selected: true
