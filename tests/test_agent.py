@@ -754,6 +754,43 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.auth_failed)
         self.assertEqual(self.service.item_details_cache, {})
 
+    def test_lock_reports_failure_when_only_signout_was_possible_and_failed(self):
+        """1Password not installed: the signout result is then the whole verdict."""
+        with patch.object(agent, "wipe_clipboard_now", return_value=True):
+            with patch("shutil.which", return_value=None):
+                with patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                    res = self.service.lock_vault()
+        self.assertFalse(res["ok"])
+
+    def test_lock_bumps_the_epoch_before_touching_the_clipboard(self):
+        """A copy waiting on the flock must not be released into a stale epoch."""
+        seen = {}
+
+        def record(*_a, **_k):
+            seen["epoch_during_wipe"] = self.service.lock_epoch
+            return True
+
+        before = self.service.lock_epoch
+        with patch.object(agent, "wipe_clipboard_now", side_effect=record):
+            with patch("shutil.which", return_value=None):
+                with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                    self.service.lock_vault()
+        self.assertEqual(seen["epoch_during_wipe"], before + 1)
+
+    @patch("subprocess.run")
+    def test_forced_status_revokes_on_an_unrecognised_error(self, mock_run):
+        """The failed check is the evidence; op's wording varies by version."""
+        self._seed_details_cache()
+        self.service.is_unlocked = True
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="totally novel wording")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=True)
+
+        self.assertFalse(status["unlocked"])
+        self.assertTrue(self.service.auth_failed)
+        self.assertEqual(self.service.item_details_cache, {})
+
     def test_normalize_url(self):
         self.assertEqual(self.service.normalize_url("github.com"), "https://github.com")
         self.assertEqual(self.service.normalize_url("http://x.test/a"), "http://x.test/a")

@@ -473,6 +473,7 @@ class OmaPassService:
         """Checks 1Password CLI status and unlock state with fast cache."""
         now = time.time()
         with self.lock:
+            epoch = self.lock_epoch
             # The cached unlocked verdict expires in a running daemon too, not
             # only across a restart: 1Password locks itself on idle long before
             # this, and a daemon that never restarts would otherwise claim
@@ -562,6 +563,13 @@ class OmaPassService:
                     name = ""
 
                 with self.lock:
+                    if epoch != self.lock_epoch:
+                        # Locked while this check was running.
+                        return {
+                            "ok": True, "installed": True, "unlocked": False,
+                            "itemCount": len(self.items), "lastSync": self.last_sync_time,
+                            "message": "Vault was locked during this check.",
+                        }
                     self.is_unlocked = True
                     self.auth_failed = False
                     self.last_status_check = now
@@ -589,13 +597,15 @@ class OmaPassService:
                         "lastSync": self.last_sync_time,
                     }
             else:
-                # Same revocation path as any other authorization failure:
-                # flipping the flag alone left the decrypted cache in place and
-                # did not persist auth_failed across a restart.
-                self._note_op_error(res.stderr or "not currently signed in")
+                # A forced check that came back unauthorized is itself the
+                # evidence. Revoke unconditionally rather than relying on
+                # recognising op's wording, which varies by version.
                 with self.lock:
                     self.is_unlocked = False
+                    self.auth_failed = True
+                    self.item_details_cache.clear()
                     self.last_status_check = now
+                    self._save_cache()
                     return {
                         "ok": True,
                         "installed": True,
@@ -671,13 +681,14 @@ class OmaPassService:
 
     def lock_vault(self) -> Dict[str, Any]:
         """Locks 1Password, immediately clears clipboard, and clears metadata cache."""
+        with self.lock:
+            # Bumped before the clipboard is touched, not after: a copy already
+            # waiting on the clipboard flock would otherwise be released the
+            # moment the clear finishes and write its credential with an epoch
+            # that still looked current.
+            self.lock_epoch += 1
         cleared = wipe_clipboard_now()
         with self.lock:
-            # Anything already in flight belongs to the session being locked.
-            # Bumping the epoch makes those results unusable, so a fetch that
-            # lands after the lock cannot repopulate decrypted fields or flip
-            # the service back to unlocked.
-            self.lock_epoch += 1
             self._clear_cache()
 
         locked_app = None
@@ -706,7 +717,8 @@ class OmaPassService:
         # The local cache is always dropped, but saying "vault locked" when
         # neither 1Password nor op actually locked would be a lie about where
         # the secrets are.
-        if locked_app is False and signed_out is False:
+        attempted = [r for r in (locked_app, signed_out) if r is not None]
+        if attempted and not any(attempted):
             return {
                 "ok": False,
                 "error": "Cache and clipboard cleared, but 1Password did not lock. "

@@ -448,10 +448,6 @@ BarWidget {
     // The item this fetch was issued for, so a response that lands after the
     // user closed or navigated away cannot be adopted.
     property string requestedId: ""
-    // When the request was issued. If the reply crosses a window boundary the
-    // code belongs to the window that just ended, and giving it a fresh
-    // countdown would show an expired code as good for a full period.
-    property double requestedAt: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -599,6 +595,10 @@ BarWidget {
     // The item this request was issued for. A response that arrives after the
     // user has moved on must not overwrite the code shown for another item.
     property string requestedId: ""
+    // When the request was issued. If the reply crosses a window boundary the
+    // code belongs to the window that just ended, and giving it a fresh
+    // countdown would show an expired code as good for a full period.
+    property double requestedAt: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
