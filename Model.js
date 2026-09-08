@@ -95,7 +95,7 @@ function quickFieldsFor(item) {
   if (cat === "BANK_ACCOUNT") {
     // A bank account is not a card: it has an account number and a PIN, and
     // offering it a CVV was as wrong as offering a card a password.
-    return { primary: "accountNo", identity: "owner", extra: "pin" };
+    return { primary: "accountno", identity: "owner", extra: "pin" };
   }
   if (cat === "SECURE_NOTE" || cat === "DOCUMENT") {
     return { primary: "notes", identity: "", extra: "" };
@@ -122,7 +122,7 @@ var FIELD_META = {
   username:   { icon: "\u{f02fd}", label: "Username" },
   otp:        { icon: "\u{f012c}", label: "TOTP" },
   ccnum:      { icon: "\u{f092f}", label: "Card number" },
-  accountNo:  { icon: "\u{f092f}", label: "Account number" },
+  accountno:  { icon: "\u{f092f}", label: "Account number" },
   owner:      { icon: "\u{f02fd}", label: "Account holder" },
   pin:        { icon: "\uf023", label: "PIN" },
   cvv:        { icon: "\uf023", label: "CVV" },

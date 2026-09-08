@@ -51,7 +51,7 @@ test("quickFieldsFor gives each category actions it can actually perform", () =>
 
   // A bank account is not a card: no CVV.
   const bank = M.quickFieldsFor({ category: "BANK_ACCOUNT" });
-  assert.equal(bank.primary, "accountNo");
+  assert.equal(bank.primary, "accountno");
   assert.ok(!Object.values(plain(bank)).includes("cvv"));
 
   const note = M.quickFieldsFor({ category: "SECURE_NOTE" });

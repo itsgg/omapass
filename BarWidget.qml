@@ -29,6 +29,11 @@ BarWidget {
 
   function forgetDetails() {
     itemDetailsProc.pendingItem = null
+    // A StdioCollector keeps its buffer after streamFinished, so the decrypted
+    // item would stay in the widget's memory after the popup closed. Dropping
+    // the collector is what actually releases it; the next request makes a new
+    // one.
+    itemDetailsProc.stdout = null
     root.itemDetails = null
     root.selectedItem = null
     root.detailsError = ""
@@ -364,6 +369,14 @@ BarWidget {
           root.installed = resp.installed !== false
           var wasUnlocked = root.unlocked
           root.unlocked = !!resp.unlocked
+          if (wasUnlocked && !root.unlocked) {
+            // Seeing the vault lock has to drop what is on screen, not merely
+            // hide it: otherwise unlocking again redisplays the previous item,
+            // reveal state and all, without fetching it.
+            root.forgetDetails()
+            root.items = []
+            root.currentView = "list"
+          }
           root.account = resp.account || resp.name || ""
           if (resp.itemCount !== undefined) root.itemCount = resp.itemCount
           if (!wasUnlocked && root.unlocked) {
@@ -452,14 +465,11 @@ BarWidget {
     })
   }
 
-  // Item details process
-  Process {
-    id: itemDetailsProc
-    running: false
-    // The item this fetch was issued for, so a response that lands after the
-    // user closed or navigated away cannot be adopted.
-    property string requestedId: ""
-    stdout: StdioCollector {
+  // Collectors that carry decrypted material are Components, not inline
+  // objects, so a fresh one can replace a used one and take its buffer with it.
+  Component {
+    id: detailsCollector
+    StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.loadingDetails = false
@@ -475,6 +485,7 @@ BarWidget {
           var resp = JSON.parse(text)
           if (resp.ok && resp.item) {
             root.itemDetails = resp.item
+            root.detailsShownAt = Date.now()
             root.detailsError = ""
             // The code in the item payload has an unknown amount of its window
             // left, so fetch one whose expiry we actually know.
@@ -487,6 +498,18 @@ BarWidget {
         }
       }
     }
+  }
+
+  // Item details process
+  Process {
+    id: itemDetailsProc
+    running: false
+    // The item this fetch was issued for, so a response that lands after the
+    // user closed or navigated away cannot be adopted.
+    property string requestedId: ""
+    // Assigned per request from detailsCollector, and dropped by
+    // forgetDetails(): a StdioCollector keeps its buffer after the stream
+    // ends, so the whole decrypted item would otherwise stay in memory.
     // Item requested while this fetch was still in flight, re-issued on exit
     // so clicking a second item supersedes the first instead of being ignored.
     property var pendingItem: null
@@ -560,6 +583,7 @@ BarWidget {
     itemDetailsProc.exitSeen = false
     itemDetailsProc.generation++
     itemDetailsProc.requestedId = String(item.id)
+    itemDetailsProc.stdout = detailsCollector.createObject(itemDetailsProc)
     root.runHelper(itemDetailsProc, { action: "get_item", id: item.id })
   }
 
@@ -596,9 +620,16 @@ BarWidget {
   // Only claim expiry once we have actually anchored a code to a window.
   // Keyed off currentTotp alone, the banner read "EXPIRED" for the whole gap
   // between the item loading and the first live fetch returning.
+  // Stale once its window has passed, and also once the code on screen is the
+  // one that arrived with the item and no live fetch has anchored it. That
+  // code's age is unknown, so after one window it cannot be trusted.
   readonly property bool totpStale: root.currentTotp !== ""
-    && root.totpExpiresAt > 0
-    && root.totpSecondsLeft <= 0
+    && (root.totpExpiresAt > 0
+        ? root.totpSecondsLeft <= 0
+        : (root.detailsShownAt > 0 && (root.totpNow - root.detailsShownAt) > root.totpPeriod))
+
+  // When the open item's details arrived, used above to age an unanchored code.
+  property double detailsShownAt: 0
 
   Process {
     id: otpProc
@@ -907,7 +938,9 @@ BarWidget {
     property int attempts: 0
     onTriggered: {
       attempts++
-      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 8) {
+      // The helper allows a 30s sync, so giving up at 8 ticks left the user
+      // looking at "No items in vault" while it was still running.
+      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 26) {
         running = false
         attempts = 0
         return

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 import pathlib
 import tempfile
@@ -844,6 +845,58 @@ class TestOmaPassService(IsolatedRuntimeDir):
         argv = mock_popen.call_args[0][0]
         self.assertEqual(argv[0], "1password")
         self.assertNotIn("--quick-access", argv)
+
+    def test_the_wipe_worker_is_launched_with_a_runnable_command(self):
+        """Popen succeeds whatever it is given, so the command has to be real.
+
+        The refactor once pointed this at a module inside the package, which
+        exits with ImportError: every copy then promised a wipe that never ran.
+        """
+        wl_copy = MagicMock()
+        wl_copy.communicate.return_value = (b"", b"")
+        wl_copy.returncode = 0
+        launched = {}
+
+        def capture(argv, *a, **k):
+            if "_wipe" in argv:
+                launched["argv"] = argv
+                return MagicMock(pid=4242)
+            return wl_copy
+
+        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+            with patch("subprocess.Popen", side_effect=capture):
+                self.service.copy_to_clipboard(value="s3cret", field="password", timeout_seconds=30)
+
+        argv = launched["argv"]
+        script = pathlib.Path(argv[1])
+        self.assertTrue(script.is_file(), f"wipe worker script does not exist: {script}")
+        self.assertEqual(script.name, "omapass-agent.py")
+
+        # And it must actually start: run it with a delay of 0 and no token,
+        # which returns immediately without touching the clipboard.
+        proc = subprocess.run([argv[0], str(script), "_wipe", "0"],
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "OMAPASS_WIPE_TOKEN": ""})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("ImportError", proc.stderr)
+
+    def test_copies_are_marked_sensitive(self):
+        """Without the hint, clipboard managers persist the credential to disk."""
+        wl_copy = MagicMock()
+        wl_copy.communicate.return_value = (b"", b"")
+        wl_copy.returncode = 0
+        seen = {}
+
+        def capture(argv, *a, **k):
+            if argv and argv[0] == "wl-copy":
+                seen["argv"] = argv
+            return wl_copy
+
+        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+            with patch("subprocess.Popen", side_effect=capture):
+                self.service.copy_to_clipboard(value="s3cret", field="password", timeout_seconds=0)
+
+        self.assertIn("--sensitive", seen["argv"])
 
     def test_normalize_url(self):
         self.assertEqual(fields.normalize_url("github.com"), "https://github.com")

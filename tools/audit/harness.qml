@@ -104,7 +104,7 @@ ShellRoot {
     widget.unlocked = harness.state.indexOf("locked") !== 0 && harness.state !== "demo-locked"
 
     if (harness.state === "locked") {
-      widget.account = "ganesh.gunas@gmail.com"
+      widget.account = "you@example.com"
       return
     }
     if (harness.state === "locked-long") {
@@ -123,7 +123,7 @@ ShellRoot {
       return
     }
 
-    widget.account = "ganesh.gunas@gmail.com"
+    widget.account = "you@example.com"
     widget.itemCount = 367
 
     if (harness.state === "empty") {

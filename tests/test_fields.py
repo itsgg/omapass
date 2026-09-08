@@ -48,6 +48,23 @@ class TestFieldScoring(unittest.TestCase):
         ]}
         self.assertEqual(fields.match_field(item, "password"), "real")
 
+    def test_an_exact_id_outranks_an_exact_label(self):
+        """A custom field labelled "password" must not beat the real one."""
+        item = {"fields": [
+            {"id": "custom_a", "type": "STRING", "label": "password", "value": "decoy"},
+            {"id": "password", "type": "CONCEALED", "label": "Login secret", "value": "real"},
+        ]}
+        self.assertEqual(fields.match_field(item, "password"), "real")
+
+    def test_bank_account_fields_resolve(self):
+        """The rule key is lowercase because requests arrive lowercased."""
+        item = {"fields": [
+            {"id": "custom_1", "type": "STRING", "label": "Account number", "value": "12345678"},
+            {"id": "owner", "type": "STRING", "label": "owner", "value": "A N Other"},
+        ]}
+        self.assertEqual(fields.match_field(item, "accountno"), "12345678")
+        self.assertEqual(fields.match_field(item, "owner"), "A N Other")
+
     def test_notes_come_from_their_own_key(self):
         self.assertEqual(fields.match_field({"notes": "  keep  ", "fields": []}, "notes"), "  keep  ")
         self.assertIsNone(fields.match_field({"notes": "", "fields": []}, "notes"))

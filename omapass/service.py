@@ -133,6 +133,10 @@ class OmaPassService:
         blob = (stderr or "").lower()
         if any(marker in blob for marker in AUTH_ERROR_MARKERS):
             with self.lock:
+                # Same epoch bump as a lock: revoking authorization has to
+                # discard retrievals already running, or one completing a
+                # moment later restores the cache and the unlocked state.
+                self.lock_epoch += 1
                 self.is_unlocked = False
                 self.auth_failed = True
                 self.last_status_check = time.time()
@@ -355,6 +359,7 @@ class OmaPassService:
                 # evidence. Revoke unconditionally rather than relying on
                 # recognising op's wording, which varies by version.
                 with self.lock:
+                    self.lock_epoch += 1
                     self.is_unlocked = False
                     self.auth_failed = True
                     self.item_details_cache.clear()
@@ -776,8 +781,14 @@ class OmaPassService:
                         if epoch != self.lock_epoch:
                             return {"ok": False, "error": "Vault was locked during this request"}
                     try:
+                        # --sensitive, always. Omarchy's clipboard plugin
+                        # keeps a history in ~/.local/state, and without this
+                        # hint every copied credential is written there and
+                        # survives the wipe entirely. Verified: a plain copy
+                        # lands in clipboard-history.json, a sensitive one
+                        # does not.
                         proc = subprocess.Popen(
-                            ["wl-copy"],
+                            ["wl-copy", "--sensitive"],
                             stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
@@ -836,7 +847,11 @@ class OmaPassService:
                             wipe_proc = subprocess.Popen(
                                 [
                                     sys.executable,
-                                    str(pathlib.Path(__file__).resolve()),
+                                    # The entry script, never __file__: a module
+                                    # inside the package cannot be run on its own,
+                                    # and Popen succeeds either way, so the copy
+                                    # would promise a wipe that never happened.
+                                    str(entry_script()),
                                     "_wipe",
                                     str(timeout_seconds),
                                 ],
@@ -1185,8 +1200,17 @@ class OmaPassService:
             item_id = request.get("id", "")
             if not item_id:
                 return {"ok": False, "error": "No item id provided"}
+            with self.lock:
+                epoch = self.lock_epoch
             ok, value = self.fetch_field(item_id, "otp")
-            return {"ok": True, "otp": value} if ok else {"ok": False, "error": value}
+            if not ok:
+                return {"ok": False, "error": value}
+            with self.lock:
+                if epoch != self.lock_epoch:
+                    # Copy and type check this; the standalone action did not,
+                    # and handed back a live code after the vault was locked.
+                    return {"ok": False, "error": "Vault was locked during this request"}
+            return {"ok": True, "otp": value}
         elif action == "open_desktop":
             item_id = request.get("id", "")
             return self.open_desktop(item_id=item_id)

@@ -22,7 +22,9 @@ FIELD_RULES: Dict[str, Dict[str, Any]] = {
     "cvv": {"ids": {"cvv"}, "weak": ("cvv", "security code", "verification code", "card verification")},
     "cardholder": {"ids": {"cardholder"}, "weak": ("cardholder", "name on card")},
     "expiry": {"ids": {"expiry", "expires"}, "weak": ("expiry", "expiration"), "types": {"MONTH_YEAR"}},
-    "accountNo": {"ids": {"accountno", "accountnumber"}, "weak": ("account number", "account no")},
+    # Keys are lowercase: fetch_field lowercases the requested name, so a
+    # camelCase key here could never be matched.
+    "accountno": {"ids": {"accountno", "accountnumber"}, "weak": ("account number", "account no")},
     "owner": {"ids": {"owner", "accountholder"}, "weak": ("account holder", "owner")},
     "pin": {"ids": {"pin"}, "weak": ("pin",)},
 }
@@ -48,7 +50,12 @@ def field_score(f: Dict[str, Any], field: str) -> int:
     # both scored 1, so "valid from" could answer a request for "expiry".
     hay = label + " " + fid
     score = 0
-    if fid in rule.get("ids", ()) or label in rule.get("ids", ()):
+    if fid in rule.get("ids", ()):
+        score = max(score, 5)
+    if label in rule.get("ids", ()):
+        # An exact label is good evidence, but a field whose *id* is the
+        # canonical name is better: an item can carry a custom field labelled
+        # "password" sitting before the real one.
         score = max(score, 4)
     if purpose in rule.get("purposes", ()):
         score = max(score, 3)
@@ -97,7 +104,7 @@ def match_field(item_data: Dict[str, Any], field: str) -> Optional[str]:
 # finds fields the user happened to label exactly that.
 SUPPORTED_FIELDS = (
     "password", "username", "otp", "ccnum", "cvv", "cardholder", "expiry", "notes",
-    "accountNo", "owner", "pin",
+    "accountno", "owner", "pin",
 )
 
 # A field may also be named by its own id, so the details view can copy a
