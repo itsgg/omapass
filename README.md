@@ -38,8 +38,26 @@ Title, username and URL are not secrets but are still your data, so they reach
 the machine can read. Add `--dry-run` to have `op` validate without creating
 anything.
 
-This is the only write operation. Editing and deleting go through the
-1Password app, which the details view can open for the item you are looking at.
+From the widget, three ways in, all the same form:
+
+- Search for something that is not there. The empty state offers to create it,
+  with your query as the title, rather than being a dead end.
+- The **+** in the header.
+- `omarchy-shell gg.omapass new_login "GitHub"`, so it can go on a key.
+
+The form is built from a spec in `Model.js`, one entry per category, and each
+field picks its widget from 1Password's own field type. Adding a category is a
+spec entry, not new QML.
+
+Typing your own password is supported and says so on the form. It is worth
+knowing what that costs: a generated password never exists outside 1Password,
+while one you type reaches `op` through a mode-0600 file in `$XDG_RUNTIME_DIR`,
+which is tmpfs, deleted as soon as the command returns. That is far better than
+a command line, which every process on the machine can read, but it is not
+nothing. Generated is the default for that reason.
+
+Editing and deleting go through the 1Password app, which the details view can
+open for the item you are looking at.
 
 ## Keyboard
 

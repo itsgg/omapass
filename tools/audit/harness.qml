@@ -193,6 +193,15 @@ ShellRoot {
       }
     }
 
+    if (harness.state === "create") {
+      widget.vaults = [{ id: "v1", name: "Personal" }, { id: "v2", name: "Work" }]
+      widget.startCreate("GitHub")
+    }
+    if (harness.state === "create-empty") {
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startCreate("")
+    }
+
     if (harness.state === "toast") widget.statusToast = "Copied password (clears in 30s)"
   }
 

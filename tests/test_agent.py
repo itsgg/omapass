@@ -908,6 +908,26 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertIn("desktop app", res["error"])
         mock_popen.assert_not_called()
 
+    @patch("subprocess.run")
+    def test_list_vaults(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps([
+            {"id": "v1", "name": "Personal"},
+            {"id": "v2", "name": "Work"},
+            {"id": "v3"},
+        ]))
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.list_vaults()
+        self.assertTrue(res["ok"])
+        # A vault with no name is not something the picker can show.
+        self.assertEqual([v["name"] for v in res["vaults"]], ["Personal", "Work"])
+
+    @patch("subprocess.run")
+    def test_list_vaults_reports_op_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not signed in")
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.list_vaults()
+        self.assertFalse(res["ok"])
+
     def test_normalize_url(self):
         self.assertEqual(fields.normalize_url("github.com"), "https://github.com")
         self.assertEqual(fields.normalize_url("http://x.test/a"), "http://x.test/a")

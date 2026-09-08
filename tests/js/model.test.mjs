@@ -121,3 +121,47 @@ test("fieldIcon distinguishes the fields a card actually has", () => {
   assert.notEqual(cvv, ccnum);
   assert.notEqual(expiry, ccnum);
 });
+
+test("createSpec is curated, not a dump of the op template", () => {
+  const spec = M.createSpec("LOGIN");
+  assert.deepEqual(plain(spec.fields.map((f) => f.id)),
+    ["title", "username", "password", "url"]);
+  // An unknown category still yields a usable form.
+  assert.equal(M.createSpec("NONSENSE").label, "Login");
+  assert.equal(M.createSpec(null).label, "Login");
+});
+
+test("inputKindFor maps 1Password's field types to widgets", () => {
+  assert.equal(M.inputKindFor("CONCEALED"), "secret");
+  assert.equal(M.inputKindFor("URL"), "url");
+  assert.equal(M.inputKindFor("EMAIL"), "email");
+  assert.equal(M.inputKindFor("MONTH_YEAR"), "monthYear");
+  assert.equal(M.inputKindFor("MENU"), "select");
+  // An unfamiliar type must still render something.
+  assert.equal(M.inputKindFor("SOMETHING_NEW"), "text");
+  assert.equal(M.inputKindFor(null), "text");
+});
+
+test("validateCreate stops a bad form before op is ever called", () => {
+  const spec = M.createSpec("LOGIN");
+  assert.ok(M.hasErrors(M.validateCreate(spec, {})), "a title is required");
+  assert.ok(M.hasErrors(M.validateCreate(spec, { title: "   " })), "whitespace is not a title");
+  assert.ok(!M.hasErrors(M.validateCreate(spec, { title: "X" })), "title alone is enough");
+
+  // Optional fields are only checked when filled in.
+  assert.ok(!M.hasErrors(M.validateCreate(spec, { title: "X", url: "" })));
+  assert.ok(M.hasErrors(M.validateCreate(spec, { title: "X", url: "javascript:alert(1)" })));
+  assert.ok(M.hasErrors(M.validateCreate(spec, { title: "X", url: "file:///etc/passwd" })));
+  assert.ok(!M.hasErrors(M.validateCreate(spec, { title: "X", url: "github.com" })));
+  assert.ok(!M.hasErrors(M.validateCreate(spec, { title: "X", url: "https://github.com/a" })));
+});
+
+test("looksLikeWebUrl matches the helper's own rule", () => {
+  for (const ok of ["github.com", "//x.test", "http://x.test", "https://x.test/a?b=c"]) {
+    assert.ok(M.looksLikeWebUrl(ok), ok);
+  }
+  for (const bad of ["", "   ", "javascript:alert(1)", "file:///etc/passwd",
+                     "mailto:a@b.c", "ftp://x.test", "nodots"]) {
+    assert.ok(!M.looksLikeWebUrl(bad), bad);
+  }
+});

@@ -125,6 +125,47 @@ class TestCreateLogin(IsolatedRuntimeDir):
         time.sleep(0.2)
         sync.assert_called()
 
+    def test_a_typed_password_never_reaches_argv(self):
+        """It has to travel somehow; a 0600 file in tmpfs beats /proc."""
+        seen = {}
+
+        def capture(cmd, *a, **k):
+            path = [c for c in cmd if c.startswith("--template=")][0].split("=", 1)[1]
+            seen["argv"] = cmd
+            seen["mode"] = os.stat(path).st_mode & 0o777
+            with open(path) as fh:
+                seen["body"] = json.load(fh)
+            seen["path"] = path
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", side_effect=capture):
+                with patch.object(self.service, "sync"):
+                    self.service.create_login(title="X", password="hunter2")
+
+        self.assertNotIn("hunter2", " ".join(seen["argv"]))
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertFalse(os.path.exists(seen["path"]), "the typed password outlived the command")
+        pw = [f for f in seen["body"]["fields"] if f["id"] == "password"]
+        self.assertEqual(pw[0]["value"], "hunter2")
+
+    def test_a_typed_password_replaces_generation(self):
+        _, argv = self._run(title="X", password="hunter2")
+        self.assertFalse([a for a in argv if a.startswith("--generate-password")])
+
+    def test_generation_is_the_default(self):
+        _, argv = self._run(title="X")
+        self.assertTrue([a for a in argv if a.startswith("--generate-password")])
+
+    def test_a_typed_password_skips_recipe_validation(self):
+        """The recipe is irrelevant when the user supplied the password."""
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", return_value=MagicMock(
+                    returncode=0, stdout="{}", stderr="")):
+                with patch.object(self.service, "sync"):
+                    res = self.service.create_login(title="X", password="p", password_recipe="junk")
+        self.assertTrue(res["ok"])
+
     def test_dispatch_routes_create_login(self):
         with patch.object(self.service, "create_login", return_value={"ok": True}) as c:
             self.service.dispatch({"action": "create_login", "title": "X", "dryRun": True})

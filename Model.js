@@ -165,3 +165,90 @@ function displayValue(field) {
   if (type === "CREDIT_CARD_NUMBER" || id.indexOf("ccnum") !== -1) return formatCardNumber(val);
   return val;
 }
+
+// ---------------------------------------------------------------- Create form
+//
+// The form is driven by a spec rather than hand-built QML, so adding a
+// category means adding an entry here. Each field names the widget to render
+// by 1Password's own field type, which is the vocabulary op already speaks:
+// https://www.1password.dev/cli/item-fields/
+//
+// These are curated, not a dump of `op item template get`. A Login template
+// carries a dozen mostly-empty fields, and a form with twelve blanks is worse
+// than one with four.
+var CREATE_SPECS = {
+  LOGIN: {
+    label: "Login",
+    fields: [
+      { id: "title",    label: "Title",    type: "STRING",    required: true,
+        placeholder: "GitHub" },
+      { id: "username", label: "Username", type: "STRING",
+        placeholder: "you@example.com" },
+      { id: "password", label: "Password", type: "CONCEALED", generate: true },
+      { id: "url",      label: "Website",  type: "URL",
+        placeholder: "github.com" }
+    ]
+  }
+};
+
+function createSpec(category) {
+  return CREATE_SPECS[String(category || "LOGIN").toUpperCase()] || CREATE_SPECS.LOGIN;
+}
+
+// The widget a field type maps to. Unknown types fall back to plain text
+// rather than vanishing from the form.
+function inputKindFor(type) {
+  switch (String(type || "").toUpperCase()) {
+  case "CONCEALED": return "secret";
+  case "URL":       return "url";
+  case "EMAIL":     return "email";
+  case "MONTH_YEAR": return "monthYear";
+  case "MENU":      return "select";
+  default:          return "text";
+  }
+}
+
+// Validation runs before the helper is called, so a bad form never becomes a
+// failed op invocation. Returns a map of field id to message; empty means ok.
+function validateCreate(spec, values) {
+  var errors = {};
+  for (var i = 0; i < spec.fields.length; i++) {
+    var f = spec.fields[i];
+    var raw = values[f.id] === undefined || values[f.id] === null ? "" : String(values[f.id]);
+    var v = raw.trim();
+
+    if (f.required && v.length === 0) {
+      errors[f.id] = f.label + " is required";
+      continue;
+    }
+    if (v.length === 0) continue;
+
+    if (f.type === "URL" && !looksLikeWebUrl(v)) {
+      errors[f.id] = "Enter a web address, or leave it blank";
+    } else if (f.type === "EMAIL" && v.indexOf("@") < 1) {
+      errors[f.id] = "That does not look like an email address";
+    } else if (f.type === "MONTH_YEAR" && !/^\d{4}[-/]?\d{2}$/.test(v)) {
+      errors[f.id] = "Use YYYYMM";
+    }
+  }
+  return errors;
+}
+
+function hasErrors(errors) {
+  for (var k in errors) { if (errors.hasOwnProperty(k)) return true; }
+  return false;
+}
+
+// Mirrors the helper's own rule: a bare host is fine and becomes https, but a
+// non-web scheme is refused rather than quietly stored.
+function looksLikeWebUrl(value) {
+  var v = String(value || "").trim();
+  if (v.length === 0) return false;
+  if (v.indexOf("://") === -1) {
+    if (v.indexOf("//") === 0) return true;
+    var head = v.split("/")[0];
+    return head.indexOf(":") === -1 && head.indexOf(".") > 0;
+  }
+  var scheme = v.split("://")[0].toLowerCase();
+  return scheme === "http" || scheme === "https";
+}

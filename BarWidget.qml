@@ -253,8 +253,10 @@ BarWidget {
   property bool busy: false
   property bool searching: false
 
-  // View state: "list" or "details"
+  // View state: "list", "details" or "create"
   property string currentView: "list"
+  property var vaults: []
+  property bool creating: false
   property var selectedItem: null
   property var itemDetails: null
   property bool loadingDetails: false
@@ -304,6 +306,11 @@ BarWidget {
     function sync(): void { root.broadcast("syncVault") }
     function lock(): void { root.broadcast("lockVault") }
 
+    function new_login(title: string): void {
+      root.pendingCreateTitle = title || ""
+      root.broadcast("openForCreate")
+    }
+
     function search(query: string): void {
       root.pendingQuery = query || ""
       root.broadcast("openFromIpc")
@@ -313,6 +320,7 @@ BarWidget {
   // Set by the search IPC just before opening, and consumed on open so the
   // popup comes up with the query already applied.
   property string pendingQuery: ""
+  property string pendingCreateTitle: ""
 
   function openFromIpc() {
     root.open()
@@ -321,6 +329,13 @@ BarWidget {
       searchInput.text = root.pendingQuery
       root.pendingQuery = ""
     }
+  }
+
+  function openForCreate() {
+    root.open()
+    var title = root.pendingCreateTitle
+    root.pendingCreateTitle = ""
+    Qt.callLater(function() { root.startCreate(title) })
   }
 
   function toggleFromIpc() {
@@ -732,6 +747,63 @@ BarWidget {
     onTriggered: root.totpNow = Date.now()
   }
 
+  // Opening the form from a search that found nothing is the common path, so
+  // the query becomes the title. Reached from the empty state, the header, and
+  // `omarchy-shell gg.omapass new`.
+  function startCreate(title) {
+    root.forgetDetails()
+    root.currentView = "create"
+    createForm.reset(title !== undefined ? title : root.searchQuery)
+    createForm.vault = root.vaults.length > 0 ? root.vaults[0].name : ""
+    root.refreshVaults()
+    Qt.callLater(function() { createForm.focusFirst() })
+  }
+
+  function cancelCreate() {
+    root.creating = false
+    createForm.reset("")
+    root.currentView = "list"
+    Qt.callLater(function() { searchInput.forceActiveFocus() })
+  }
+
+  Process {
+    id: vaultsProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var resp = JSON.parse(text)
+          if (resp.ok && resp.vaults) root.vaults = resp.vaults
+          if (root.vaults.length > 0 && !createForm.vault) {
+            createForm.vault = root.vaults[0].name
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  function refreshVaults() {
+    if (vaultsProc.running) return
+    root.runHelper(vaultsProc, { action: "vaults" })
+  }
+
+  function submitCreate(payload) {
+    if (root.creating) return
+    root.creating = true
+    createForm.submitError = ""
+    createForm.busy = true
+    var what = payload.title
+    runAction({
+      action: "create_login",
+      title: payload.title,
+      username: payload.username,
+      url: payload.url,
+      vault: payload.vault,
+      password: payload.password
+    }, "Created " + what)
+  }
+
   function backToList() {
     itemDetailsProc.pendingItem = null
     root.freshTotp = ""
@@ -760,6 +832,7 @@ BarWidget {
   // flight used to vanish with no feedback at all.
   property var actionQueue: []
   property var runningAction: null
+  property bool lastActionFailed: false
 
   Process {
     id: actionProc
@@ -768,11 +841,16 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: {
         var job = root.runningAction
+        root.lastActionFailed = false
         try {
           var resp = JSON.parse(text)
           if (resp.ok) {
             if (job && job.successToast) root.showToast(job.successToast)
           } else {
+            root.lastActionFailed = true
+            if (job && job.payload.action === "create_login") {
+              createForm.submitError = resp.error || "Could not create the item"
+            }
             root.showToast(resp.error || "Action failed")
             // op refuses when the vault relocked under us; reflect that.
             root.checkStatus()
@@ -1029,7 +1107,9 @@ BarWidget {
     // Keys handler fires, and it differs per view.
     focusTarget: !root.unlocked
       ? lockedColumn.unlockButton
-      : (root.currentView === "details" ? detailsViewArea : searchInput)
+      : (root.currentView === "details"
+          ? detailsViewArea
+          : (root.currentView === "create" ? createForm : searchInput))
 
     // KeyboardPanel only focuses focusTarget when the surface maps. Unlocking,
     // locking or switching views swaps the target while the panel stays open,
@@ -1100,6 +1180,17 @@ BarWidget {
         }
 
         Item { Layout.fillWidth: true }
+
+        // New item
+        Button {
+          visible: root.unlocked
+          iconText: "\u{f0415}"
+          tooltipText: "New login"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: root.startCreate(root.searchQuery)
+        }
 
         // Sync button
         Button {
@@ -1640,6 +1731,7 @@ BarWidget {
             theme: appTheme
             loading: root.searching
             query: root.searchQuery
+            onCreateRequested: function(title) { root.startCreate(title) }
           }
         }
 
@@ -1677,6 +1769,74 @@ BarWidget {
           }
         }
       }
+
+      // ========================================== CREATE HEADER
+      RowLayout {
+        visible: root.currentView === "create"
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Button {
+          iconText: "\u{f004d}"
+          text: "Back"
+          accent: root.colAccent
+          horizontalPadding: Style.space(8)
+          verticalPadding: Style.space(4)
+          onClicked: root.cancelCreate()
+        }
+
+        Rectangle {
+          width: Style.space(28)
+          height: Style.space(28)
+          radius: Style.space(6)
+          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.2)
+
+          Text {
+            anchors.centerIn: parent
+            text: "\u{f0415}"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(14)
+            color: root.colAccent
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 1
+
+          Text {
+            Layout.fillWidth: true
+            text: "New login"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            color: root.colForeground
+            elide: Text.ElideRight
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: "1Password generates the password unless you type one"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption - 1
+            color: root.colDim
+            elide: Text.ElideRight
+          }
+        }
+      }
+
+      // ========================================== UNLOCKED: CREATE VIEW
+      CreateForm {
+        id: createForm
+        visible: root.unlocked && root.currentView === "create"
+        theme: appTheme
+        vaults: root.vaults
+        focus: visible
+        onVisibleChanged: if (visible) forceActiveFocus()
+        onCancelled: root.cancelCreate()
+        onSubmitted: function(payload) { root.submitCreate(payload) }
+      }
+
 
       // ========================================== UNLOCKED: DETAILS VIEW
       Item {
