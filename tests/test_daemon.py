@@ -112,5 +112,59 @@ class TestNoDaemon(IsolatedRuntimeDir):
         self.assertIsNone(daemon.send_socket_request({"action": "ping"}, timeout=0.2))
 
 
+
+class TestVersionHandshake(IsolatedRuntimeDir):
+    """A daemon from an older build must never be handed a request.
+
+    The protocol version exists because the daemon outlives a plugin update.
+    An old one that survives its SIGTERM keeps the lifetime lock, so the
+    replacement exits at once and the old one goes on answering.
+    """
+
+    def setUp(self):
+        super().setUp()
+        os.chmod(self.runtime, 0o700)
+
+    def test_a_stale_daemon_is_answered_around_not_through(self):
+        stale = daemon.PROTOCOL_VERSION - 1
+        sent = []
+
+        def never_dies(*_a, **_k):
+            return None
+
+        def request(req, timeout=15.0):
+            sent.append(req)
+            return {"ok": True, "version": stale, "from": "the old daemon"}
+
+        with patch.object(daemon, "send_socket_request", side_effect=request):
+            with patch.object(daemon, "stop_stale_daemon", side_effect=never_dies):
+                with patch("subprocess.Popen"):
+                    with patch("time.sleep"):
+                        with patch.object(daemon, "OmaPassService") as svc:
+                            svc.return_value.dispatch.return_value = {"ok": True, "from": "in process"}
+                            daemon.handle_request({"action": "edit_item", "id": "i1"})
+
+        # The edit was served by this build, not by whatever is on the socket.
+        svc.return_value.dispatch.assert_called_once()
+        self.assertEqual(
+            [r for r in sent if r.get("action") == "edit_item"], [],
+            "an edit reached a daemon running a different protocol version",
+        )
+
+    def test_ensure_daemon_reports_failure_when_the_old_one_survives(self):
+        stale = daemon.PROTOCOL_VERSION - 1
+        with patch.object(daemon, "send_socket_request",
+                          return_value={"ok": True, "version": stale}):
+            with patch.object(daemon, "stop_stale_daemon"):
+                with patch("subprocess.Popen"):
+                    with patch("time.sleep"):
+                        self.assertFalse(daemon.ensure_daemon())
+
+    def test_ensure_daemon_reports_success_at_our_version(self):
+        with patch.object(daemon, "send_socket_request",
+                          return_value={"ok": True, "version": daemon.PROTOCOL_VERSION}):
+            self.assertTrue(daemon.ensure_daemon())
+
+
 if __name__ == "__main__":
     unittest.main()

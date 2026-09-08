@@ -239,5 +239,59 @@ class TestCreateLogin(IsolatedRuntimeDir):
         self.assertTrue(c.call_args.kwargs["dry_run"])
 
 
+class TestCreateUpdatesTheList(IsolatedRuntimeDir):
+    """A created item has to appear without waiting for the background sync."""
+
+    def setUp(self):
+        super().setUp()
+        os.chmod(self.runtime, 0o700)
+        self.service = service.OmaPassService()
+
+    def test_a_created_item_is_added_to_the_cached_list(self):
+        created = {"id": "new1", "title": "GitHub", "category": "LOGIN",
+                   "vault": {"name": "Personal"}}
+
+        def run(cmd, *a, **k):
+            return MagicMock(returncode=0, stdout=json.dumps(created), stderr="")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", side_effect=run):
+                with patch.object(self.service, "sync"):
+                    res = self.service.create_item(
+                        category="LOGIN", title="GitHub",
+                        item_fields={"username": {"value": "octocat", "type": "STRING"}},
+                        url="github.com", vault="Personal", generate_field="password")
+
+        self.assertTrue(res["ok"], res.get("error"))
+        row = next(i for i in self.service.items if i["id"] == "new1")
+        self.assertEqual(row["title"], "GitHub")
+        self.assertEqual(row["username"], "octocat")
+        self.assertEqual(row["url"], "https://github.com")
+
+    def test_a_new_row_from_a_locked_session_is_dropped(self):
+        """Called directly: create_item checks the epoch itself and returns
+        before the cache is touched, so going through it tested nothing."""
+        self.service.items = []
+        stale = self.service.lock_epoch
+        self.service.lock_epoch += 1
+        self.service._add_cached_item({"id": "new1", "title": "GitHub"}, stale)
+        self.assertEqual(self.service.items, [])
+
+    def test_a_new_row_from_the_current_session_lands(self):
+        self.service.items = []
+        self.service._add_cached_item({"id": "new1", "title": "GitHub"},
+                                      self.service.lock_epoch)
+        self.assertEqual([i["id"] for i in self.service.items], ["new1"])
+
+    def test_a_dry_run_adds_nothing(self):
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", return_value=MagicMock(
+                    returncode=0, stdout=json.dumps({"id": "x"}), stderr="")):
+                with patch.object(self.service, "sync"):
+                    self.service.create_item(category="LOGIN", title="T",
+                                             item_fields={}, dry_run=True)
+        self.assertEqual(self.service.items, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,8 @@ OMAPASS_AUDIT_BACKDROP="${OMAPASS_AUDIT_BACKDROP:-}" \
 OMAPASS_AUDIT_STATE="$state" \
   quickshell -p "$WORK/harness.qml" >"$SHOTS/$state.log" 2>&1 &
 qs_pid=$!
-sleep 3.0
+# The tab-key state needs longer: it has to be driven after it renders.
+sleep "${OMAPASS_AUDIT_HOLD:-3.0}"
 grim "$SHOTS/$state.png" 2>/dev/null
 kill "$qs_pid" 2>/dev/null
 wait "$qs_pid" 2>/dev/null

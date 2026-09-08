@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import fields
 from .clipboard import (
     cancel_previous_wipe,
+    digest_of,
     clear_clipboard_once,
     warn_clipboard_not_cleared,
     wipe_clipboard_now,
@@ -83,6 +84,9 @@ class OmaPassService:
         # Spawned clipboard-wipe children. The daemon is long-lived, so
         # something has to wait() on them or every copy leaves a zombie.
         self._wipe_procs: List[subprocess.Popen] = []
+        # Fingerprint of the last value this daemon copied, so locking can tell
+        # whether the clipboard still holds it or something the user copied.
+        self._last_copy_digest: str = ""
         self._load_cache()
 
     def reap_wipe_children(self) -> None:
@@ -491,7 +495,7 @@ class OmaPassService:
             # moment the clear finishes and write its credential with an epoch
             # that still looked current.
             self.lock_epoch += 1
-        cleared = wipe_clipboard_now()
+        cleared = wipe_clipboard_now(self._last_copy_digest)
         with self.lock:
             self._clear_cache()
 
@@ -827,6 +831,15 @@ class OmaPassService:
                     except Exception as e:
                         return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
+                    # Recorded here, not at the end of this block: the wipe
+                    # arming below has failure paths that return early, and
+                    # leaving a previous copy's digest in place made a later
+                    # lock compare against the wrong secret, decide the
+                    # clipboard held something else, and skip clearing the
+                    # one actually sitting on it.
+                    with self.lock:
+                        self._last_copy_digest = digest_of(value)
+
                     # Kill previous wipe process if running
                     wp = wipe_pid_path()
                     if wp.exists():
@@ -851,7 +864,14 @@ class OmaPassService:
 
                         # The token travels in the environment, not argv:
                         # /proc/<pid>/cmdline is world-readable, environ is not.
-                        wipe_env = dict(os.environ, OMAPASS_WIPE_TOKEN=token)
+                        wipe_env = dict(
+                            os.environ,
+                            OMAPASS_WIPE_TOKEN=token,
+                            # A fingerprint, not the secret, so the worker can
+                            # tell whether the clipboard still holds what it
+                            # was sent to remove.
+                            OMAPASS_WIPE_DIGEST=digest_of(value),
+                        )
                         try:
                             write_private(unique_tmp, token)
                             unique_tmp.replace(tp)
@@ -1327,6 +1347,18 @@ class OmaPassService:
 
         self._note_op_success(epoch)
         if not dry_run:
+            new_id = created.get("id", "")
+            if new_id:
+                self._add_cached_item({
+                    "id": new_id,
+                    "title": created.get("title", title),
+                    "category": str(created.get("category", category)).upper(),
+                    "username": field_value(values.get("username", "")),
+                    "url": normalized_url or "",
+                    "vault": (created.get("vault") or {}).get("name", vault),
+                    "favorite": bool(created.get("favorite", False)),
+                    "updatedAt": created.get("updated_at", ""),
+                }, epoch)
             threading.Thread(target=self.sync, daemon=True).start()
 
         return {
@@ -1336,6 +1368,51 @@ class OmaPassService:
             "title": created.get("title", title),
             "vault": (created.get("vault") or {}).get("name", vault),
         }
+
+    def _add_cached_item(self, entry: Dict[str, Any], epoch: int) -> None:
+        """Puts a newly created item into the cached list.
+
+        The background sync is the authority, but it takes as long as op takes,
+        and until it lands the list on screen still shows the vault as it was
+        before the write. Updating the cache here is what makes a new item
+        appear the moment the write returns.
+
+        The epoch is not optional. A lock clears this cache and deletes it from
+        disk; writing an item back afterwards would repopulate both, and a
+        later _load_cache would read that as a vault still unlocked.
+        """
+        if not entry.get("id"):
+            return
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return
+            rest = [i for i in self.items if i.get("id") != entry["id"]]
+            self.items = [entry] + rest
+            self._save_cache()
+
+    def _patch_cached_item(self, item_id: str, epoch: int,
+                           updates: Dict[str, Any]) -> None:
+        """Applies updates to the cached row for item_id, if it is still there.
+
+        Finding the row and writing it back happen in one critical section: a
+        delete landing in between would otherwise be undone by writing the row
+        we had already read back into the list.
+        """
+        if not item_id or not updates:
+            return
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return
+            out = []
+            for item in self.items:
+                if item.get("id") == item_id:
+                    patched = dict(item)
+                    patched.update(updates)
+                    out.append(patched)
+                else:
+                    out.append(item)
+            self.items = out
+            self._save_cache()
 
     def create_login(
         self,
@@ -1730,6 +1807,17 @@ class OmaPassService:
             self.item_details_cache.pop(item_id, None)
 
         self._note_op_success(epoch)
+        # The row on screen shows the title, username and website, so an edit
+        # to any of them has to reach the cached list or the change appears to
+        # have been lost until the next sync completes.
+        updates: Dict[str, Any] = {}
+        if set_title:
+            updates["title"] = new_title
+        if "username" in assigned:
+            updates["username"] = assigned["username"]
+        if set_url:
+            updates["url"] = normalized_url
+        self._patch_cached_item(item_id, epoch, updates)
         threading.Thread(target=self.sync, daemon=True).start()
         return {"ok": True, "id": item_id, "changed": touched,
                 "dryRun": False, "verified": True}

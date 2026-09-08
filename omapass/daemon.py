@@ -43,17 +43,24 @@ def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optio
         data = json.dumps(request) + "\n"
         sock.sendall(data.encode("utf-8"))
 
-        buffer = ""
+        # Bytes accumulated and decoded once, never chunk by chunk: a
+        # multi-byte character split across a recv boundary would raise
+        # mid-stream. Responses are ASCII today because json.dumps escapes
+        # non-ASCII, so this is a trap rather than a live bug, and the fix
+        # costs nothing.
+        buffer = b""
         while True:
             chunk = sock.recv(4096)
             if not chunk:
                 break
-            buffer += chunk.decode("utf-8")
-            if "\n" in buffer:
+            buffer += chunk
+            if len(buffer) > MAX_REQUEST_BYTES:
+                raise ValueError("Response too large")
+            if b"\n" in buffer:
                 break
 
-        line = buffer.strip().split("\n")[0]
-        return json.loads(line)
+        line, _, _ = buffer.partition(b"\n")
+        return json.loads(line.decode("utf-8"))
     except Exception:
         return None
     finally:
@@ -124,11 +131,17 @@ def stop_stale_daemon() -> None:
             break
 
 
-def ensure_daemon() -> None:
-    """Ensures background daemon is running, using serialized file lock to prevent race conditions."""
+def ensure_daemon() -> bool:
+    """Starts the daemon if needed. True when one at our version is serving.
+
+    The answer matters: a stale daemon that outlives its SIGTERM keeps holding
+    the lifetime lock, so the replacement exits immediately and the old one
+    goes on answering. Reporting that rather than assuming success is what
+    lets the caller refuse to talk to it.
+    """
     version = running_daemon_version()
     if version == PROTOCOL_VERSION:
-        return
+        return True
     if version is not None:
         # Serving, but from an older build of the plugin.
         stop_stale_daemon()
@@ -140,7 +153,7 @@ def ensure_daemon() -> None:
             fcntl.flock(sf, fcntl.LOCK_EX)
             # Re-check under lock; another process may have just started the daemon
             if running_daemon_version() == PROTOCOL_VERSION:
-                return
+                return True
 
             script_path = entry_script()
             subprocess.Popen(
@@ -150,11 +163,14 @@ def ensure_daemon() -> None:
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
             )
-            # Wait up to 1.5s for socket to become responsive
+            # Wait for a daemon at our version, not merely for one that
+            # answers: a surviving old daemon answers too, and treating that
+            # as success is how a request reaches the build we just replaced.
             for _ in range(15):
                 time.sleep(0.1)
-                if running_daemon_version() is not None:
-                    break
+                if running_daemon_version() == PROTOCOL_VERSION:
+                    return True
+            return False
         finally:
             try:
                 fcntl.flock(sf, fcntl.LOCK_UN)
@@ -292,7 +308,7 @@ def run_daemon(install_signals: bool = True, on_ready=None):
 def handle_request(req: Dict[str, Any]):
     """Dispatches request via daemon socket, auto-starting daemon if needed, with structured error handling."""
     try:
-        ensure_daemon()
+        ours = ensure_daemon()
         action = req.get("action", "")
         if action in ("create_item", "create_login", "edit_item", "delete_item"):
             # A write can run op three times (read, preview, commit) at 25s
@@ -304,6 +320,13 @@ def handle_request(req: Dict[str, Any]):
             timeout = 40.0
         else:
             timeout = 10.0
+        if not ours:
+            # Something is serving, but not this build. Answering in process
+            # is slower than the socket and always this build's own code,
+            # which is the whole point of the version handshake.
+            print(json.dumps(OmaPassService().dispatch(req)))
+            return
+
         resp = send_socket_request(req, timeout=timeout)
         if resp is not None:
             print(json.dumps(resp))

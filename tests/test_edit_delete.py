@@ -502,6 +502,61 @@ class TestEditItem(IsolatedRuntimeDir):
         with patch.object(self.service, "check_op_installed", return_value=True):
             self.assertFalse(self.service.edit_item(item_id="")["ok"])
 
+    # The list on screen is built from the helper's cached list. A write that
+    # does not touch it leaves the change invisible until the background sync
+    # happens to land, which is how a renamed item kept its old title.
+
+    def test_a_rename_reaches_the_cached_list_at_once(self):
+        self.service.items = [{"id": "i1", "title": "GitHub", "username": "octocat",
+                               "url": "https://github.com", "category": "LOGIN"}]
+        res, _ = self._edit(title="Renamed")
+        self.assertTrue(res["ok"], res.get("error"))
+        row = next(i for i in self.service.items if i["id"] == "i1")
+        self.assertEqual(row["title"], "Renamed")
+
+    def test_a_new_username_and_website_reach_the_cached_list(self):
+        self.service.items = [{"id": "i1", "title": "GitHub", "username": "octocat",
+                               "url": "https://github.com", "category": "LOGIN"}]
+        self._edit(changes={"username": "someone-else"}, url="example.com")
+        row = next(i for i in self.service.items if i["id"] == "i1")
+        self.assertEqual(row["username"], "someone-else")
+        self.assertEqual(row["url"], "https://example.com")
+
+    # These call the cache writers directly. Driving them through edit_item
+    # proved nothing: it checks the epoch itself and returns before the cache
+    # is touched, so the test passed with the guard removed.
+
+    def test_a_patch_from_a_locked_session_is_dropped(self):
+        """A lock empties the cache and deletes it from disk. Writing a row
+        back afterwards would rebuild both, and a later load would read that
+        as a vault still unlocked."""
+        self.service.items = [{"id": "i1", "title": "GitHub"}]
+        stale = self.service.lock_epoch
+        self.service.lock_epoch += 1
+        self.service._patch_cached_item("i1", stale, {"title": "Renamed"})
+        self.assertEqual(self.service.items[0]["title"], "GitHub")
+
+    def test_a_patch_from_the_current_session_lands(self):
+        self.service.items = [{"id": "i1", "title": "GitHub"}]
+        self.service._patch_cached_item("i1", self.service.lock_epoch,
+                                        {"title": "Renamed"})
+        self.assertEqual(self.service.items[0]["title"], "Renamed")
+
+    def test_an_edit_does_not_resurrect_an_item_deleted_under_it(self):
+        """Lookup and write-back happen in one critical section, so a row
+        removed in between stays removed."""
+        self.service.items = []
+        self.service._patch_cached_item("i1", self.service.lock_epoch,
+                                        {"title": "Renamed"})
+        self.assertEqual(self.service.items, [])
+
+    def test_an_edit_does_not_invent_a_row_for_an_item_not_listed(self):
+        """A vault the list has never synced must not gain a phantom entry."""
+        self.service.items = []
+        res, _ = self._edit(title="Renamed")
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(self.service.items, [])
+
 
 class TestDeleteItem(IsolatedRuntimeDir):
     def setUp(self):

@@ -40,7 +40,10 @@ ColumnLayout {
   readonly property bool canGenerate: root.generateField.length > 0
   property alias firstField: fieldRepeater
 
-  function selectCategory(id) {
+  // `keepFocus` is for the keyboard path: arrowing across the chips must
+  // leave focus on the chips, or the first arrow press throws the user into
+  // the title field and the second one edits text instead of moving.
+  function selectCategory(id, keepFocus) {
     // Inert while a save is in flight. The save carries the values as they
     // were when it was submitted, so anything changed under it would be
     // discarded when it lands, with nothing on screen to say so.
@@ -49,7 +52,17 @@ ColumnLayout {
     var keepTitle = root.values.title || ""
     root.category = id
     root.reset(keepTitle)
-    Qt.callLater(function() { root.focusFirst() })
+    if (!keepFocus) Qt.callLater(function() { root.focusFirst() })
+  }
+
+  function stepCategory(delta) {
+    if (root.editing || root.busy) return
+    var cats = Model.createCategories()
+    var at = 0
+    for (var i = 0; i < cats.length; i++) {
+      if (cats[i].id === root.category) at = i
+    }
+    root.selectCategory(cats[(at + delta + cats.length) % cats.length].id, true)
   }
 
   // Fills the form from an existing item.
@@ -93,10 +106,15 @@ ColumnLayout {
     }
   }
 
+  // The first field that actually has something to type into. Index 0 is not
+  // always one: a generated password shows a placeholder, not an editor.
   function focusFirst() {
-    if (fieldRepeater.count > 0) {
-      var f = fieldRepeater.itemAt(0)
-      if (f && f.input) f.input.forceActiveFocus()
+    for (var i = 0; i < fieldRepeater.count; i++) {
+      var f = fieldRepeater.itemAt(i)
+      if (f && f.input) {
+        f.input.forceActiveFocus()
+        return
+      }
     }
   }
 
@@ -172,11 +190,19 @@ ColumnLayout {
       // Category chooser. Which kind of item this is changes the whole form,
       // so it comes first and reads as a choice rather than a setting.
       RowLayout {
+        id: categoryRow
         visible: !root.editing
         enabled: !root.busy
         opacity: root.busy ? 0.55 : 1.0
         Layout.fillWidth: true
         spacing: Style.space(4)
+
+        // The chips were mouse-only, so a keyboard user could not choose what
+        // kind of item to create at all. One stop for the group with Left and
+        // Right inside it, which is how a set of exclusive choices behaves.
+        activeFocusOnTab: visible && !root.busy
+        Keys.onLeftPressed: root.stepCategory(-1)
+        Keys.onRightPressed: root.stepCategory(1)
 
         Repeater {
           model: Model.createCategories()
@@ -192,8 +218,13 @@ ColumnLayout {
               : (catMouse.containsMouse
                   ? Qt.rgba(root.theme.foreground.r, root.theme.foreground.g, root.theme.foreground.b, 0.08)
                   : "transparent")
-            border.color: isSelected ? root.theme.accent : "transparent"
-            border.width: 1
+            border.color: isSelected
+              ? root.theme.accent
+              : (categoryRow.activeFocus ? Qt.rgba(root.theme.foreground.r,
+                                                   root.theme.foreground.g,
+                                                   root.theme.foreground.b, 0.35)
+                                         : "transparent")
+            border.width: (isSelected && categoryRow.activeFocus) ? 2 : 1
 
             Row {
               id: catRow
@@ -288,6 +319,7 @@ ColumnLayout {
           Button {
             visible: root.vaults.length === 0 && !root.vaultsLoading
             text: "Retry"
+            focusable: true
             accent: root.theme.accent
             horizontalPadding: Style.space(8)
             verticalPadding: Style.space(2)
@@ -356,6 +388,7 @@ ColumnLayout {
 
     Button {
       text: "Cancel"
+      focusable: true
       iconText: "\u{f0156}"
       accent: root.theme.accent
       horizontalPadding: Style.space(10)
@@ -377,6 +410,7 @@ ColumnLayout {
         ? "Saving..."
         : (root.editing ? "Save changes" : ("Create " + root.spec.label.toLowerCase()))
       iconText: "\u{f0306}"
+      focusable: true
       accent: root.theme.accent
       selected: true
       bordered: true

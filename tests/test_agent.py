@@ -645,6 +645,96 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_warn.assert_not_called()
         self.assertFalse(agent.token_path().exists())
 
+    # A wipe must remove our secret and nothing else. The token only speaks
+    # for copies made through the widget; these cover the user copying
+    # something of their own in the meantime.
+
+    def _paste(self, returncode, stdout):
+        """Stands in for wl-paste reporting what is on the clipboard."""
+        def run(cmd, *a, **k):
+            if cmd[:1] == ["wl-paste"]:
+                return MagicMock(returncode=returncode, stdout=stdout)
+            return MagicMock(returncode=0, stdout=b"")
+        return run
+
+    def test_wipe_leaves_alone_a_clipboard_the_user_has_replaced(self):
+        agent.write_private(agent.token_path(), "mine")
+        agent.write_private(agent.wipe_pid_path(), "1234")
+        digest = clipboard.digest_of("the-secret")
+
+        with patch("subprocess.run", side_effect=self._paste(0, b"a shopping list")):
+            with patch.object(clipboard, "clear_clipboard_once") as mock_clear:
+                with patch("time.sleep"):
+                    agent.run_wipe_worker(0, "mine", digest)
+
+        mock_clear.assert_not_called()
+        # Nothing of ours is out there any more, so the bookkeeping goes too.
+        self.assertFalse(agent.token_path().exists())
+        self.assertFalse(agent.wipe_pid_path().exists())
+
+    def test_wipe_still_clears_when_the_secret_is_the_one_on_the_clipboard(self):
+        agent.write_private(agent.token_path(), "mine")
+        digest = clipboard.digest_of("the-secret")
+
+        with patch("subprocess.run", side_effect=self._paste(0, b"the-secret")):
+            with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
+                with patch("time.sleep"):
+                    agent.run_wipe_worker(0, "mine", digest)
+
+        mock_clear.assert_called_once()
+        self.assertFalse(agent.token_path().exists())
+
+    def test_a_clipboard_that_cannot_be_read_is_still_cleared(self):
+        """wl-paste exits 1 both for an empty clipboard and for an
+        unreachable compositor, and only the first means the secret has gone.
+        Clearing an empty clipboard is a no-op, so both take the safe path."""
+        agent.write_private(agent.token_path(), "mine")
+        with patch("subprocess.run", side_effect=self._paste(1, b"")):
+            with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
+                with patch("time.sleep"):
+                    agent.run_wipe_worker(0, "mine", clipboard.digest_of("x"))
+        mock_clear.assert_called_once()
+
+    def test_an_unreadable_clipboard_is_cleared_anyway(self):
+        """Not being able to look is not evidence the secret has gone."""
+        agent.write_private(agent.token_path(), "mine")
+        with patch("subprocess.run", side_effect=OSError("no wl-paste")):
+            with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
+                with patch("time.sleep"):
+                    agent.run_wipe_worker(0, "mine", clipboard.digest_of("x"))
+        mock_clear.assert_called_once()
+
+    def test_a_wipe_with_no_digest_clears_as_before(self):
+        """An older worker across an upgrade carries no digest."""
+        agent.write_private(agent.token_path(), "mine")
+        with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
+            with patch("time.sleep"):
+                agent.run_wipe_worker(0, "mine", "")
+        mock_clear.assert_called_once()
+
+    def test_locking_does_not_clobber_what_the_user_copied(self):
+        with patch("subprocess.run", side_effect=self._paste(0, b"their own text")):
+            with patch.object(clipboard, "clear_clipboard_once") as mock_clear:
+                cleared = clipboard.wipe_clipboard_now(clipboard.digest_of("the-secret"))
+        self.assertTrue(cleared, "the secret is already off the clipboard")
+        mock_clear.assert_not_called()
+
+    def test_locking_with_nothing_of_ours_copied_leaves_the_clipboard_alone(self):
+        """A fresh daemon has copied nothing, so it has nothing to take back."""
+        self.assertFalse(agent.token_path().exists())
+        with patch.object(clipboard, "clear_clipboard_once") as mock_clear:
+            cleared = clipboard.wipe_clipboard_now("")
+        self.assertTrue(cleared)
+        mock_clear.assert_not_called()
+
+    def test_locking_clears_when_a_copy_is_outstanding_and_unidentified(self):
+        """A token with no digest means an older daemon copied something."""
+        agent.write_private(agent.token_path(), "from-an-older-daemon")
+        with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
+            cleared = clipboard.wipe_clipboard_now("")
+        self.assertTrue(cleared)
+        mock_clear.assert_called_once()
+
     def test_wipe_worker_stops_when_a_newer_copy_takes_over_mid_retry(self):
         agent.write_private(agent.token_path(), "mine")
 

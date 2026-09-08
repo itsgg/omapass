@@ -768,6 +768,13 @@ BarWidget {
     createForm.selectCategory(id)
   }
 
+  // The popup is its own window, so nothing inside it is reachable from the
+  // bar item's focus chain. The audit harness walks the tab order from here:
+  // a control Tab skips looks exactly like one it reaches in a screenshot, so
+  // enumeration is the only way to check it.
+  readonly property Item createFormItem: createForm
+  readonly property Item popupContentItem: popupContent
+
   // Editing reuses the create form: the same spec decides which fields are
   // shown. The helper preserves everything the form does not show, so a
   // narrow form cannot cost the user their custom fields.
@@ -1013,6 +1020,20 @@ BarWidget {
     if (errorText) root.showToast(errorText)
 
     var completed = job.payload.action
+    // A write changes the vault, so the list on screen is now wrong. Archiving
+    // an item left it sitting in the list, a new item did not appear, and a
+    // renamed one kept its old title, until something else happened to
+    // refresh. The helper updates its cached list before it answers, so this
+    // reads back the change rather than racing the background sync.
+    if (completed === "create_item" || completed === "edit_item"
+        || completed === "delete_item") {
+      // The job's own verdict, not root.lastActionFailed: that property
+      // belongs to whichever action last parsed a response, and a reply this
+      // job could not parse at all leaves it reading as a success.
+      if (job.answered === true && job.succeeded === true && !errorText) {
+        root.refreshItems()
+      }
+    }
     if (completed === "create_item" || completed === "edit_item") {
       // Only if the form on screen is still the one that submitted. Otherwise
       // this is an older save landing under a draft the user has since
@@ -2201,7 +2222,7 @@ BarWidget {
                     // Dimmed once the window has passed: a code that looks
                     // crisp but no longer works is worse than one that says so.
                     text: root.currentTotp
-                    font.family: "JetBrainsMono Nerd Font, monospace"
+                    font.family: root.fontFamily
                     font.pixelSize: Style.font.heading
                     font.bold: true
                     color: root.totpStale ? root.colDim : root.colForeground
@@ -2367,7 +2388,7 @@ BarWidget {
                     id: notesText
                     width: parent.width
                     text: (root.itemDetails && root.itemDetails.notes) ? root.itemDetails.notes : ""
-                    font.family: "JetBrainsMono Nerd Font, monospace"
+                    font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     color: root.colForeground
                     readOnly: true

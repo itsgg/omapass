@@ -2,7 +2,7 @@
 
 **OmaPass** is a native, ultra-responsive [Omarchy](https://omarchy.org/) status bar widget and instant vault launcher for [1Password](https://1password.com/).
 
-Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates directly into your Hyprland bar and desktop theme with sub-millisecond search, biometric unlock, and zero Electron bloat.
+Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates directly into your Hyprland bar and desktop theme. Search runs against an in-memory list as you type, unlocking is the desktop app's own biometric prompt, and there is no Electron anywhere in it.
 
 ![OmaPass](docs/preview.png)
 
@@ -14,7 +14,7 @@ Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates dir
 - 󰤯 **Category Filtering**: Quick filter chips for *Logins*, *Credit Cards*, *Secure Notes*, and *Favorites*.
 - 󰌏 **Biometric unlock**: authorization goes through the desktop app's CLI integration, so unlocking is the same fingerprint prompt as the app itself.
 - 🎨 **Unified Omarchy Theming**: Automatically inherits your Omarchy colors, borders, font family, and blur.
-- 🛡️ **Secret Isolation**: Decrypted secrets are fetched on demand, held in the helper's memory for at most 90 seconds, and piped straight to `wl-copy`. Every copy is wiped from the clipboard after `clipboardTimeout` seconds.
+- 🛡️ **Secret Isolation**: Decrypted secrets are fetched on demand, expire from the helper's memory 90 seconds after they are fetched (a sweep clears them within a few seconds of that), and are piped straight to `wl-copy`, never passed as an argument. Every copy is taken off the clipboard after `clipboardTimeout` seconds, unless you copied something else first, in which case it is already gone and your clipboard is left alone.
 
 ## A look around
 
@@ -137,6 +137,25 @@ button copy, but only where the item actually has that field.
 | <kbd>w</kbd> | Open the item's website |
 | <kbd>←</kbd> / <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd> | Back to the list |
 
+In the create and edit form:
+
+| Key | Does |
+| --- | --- |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Move between every field, Cancel and Save, and, when creating, the category chips and the vault |
+| <kbd>←</kbd> / <kbd>→</kbd> | Choose the category, while the chips have focus (creating only) |
+| <kbd>Space</kbd> / <kbd>Enter</kbd> | Press the focused button |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Save from anywhere in the form |
+| <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd> | Cancel |
+
+An edit changes an existing item, so it offers neither the category chips nor
+the vault: 1Password cannot change either after the fact.
+
+`tools/audit/shoot-all.sh` prints the focus chain of every view, so a control
+Tab cannot reach is a visible regression rather than something found by
+tabbing around, and `tools/audit/tabkey.sh` sends a real Tab to the note
+editor, which is the only way to catch a field that Tab can enter but not
+leave.
+
 Revealing follows the focused field: move off it and it re-conceals.
 
 ## Binding it to a key
@@ -200,7 +219,7 @@ code outlives its 30-second window long before the cache entry expires.
 Link the repository directly into your Omarchy plugins directory:
 
 ```bash
-ln -s ~/Work/GG/omapass ~/.config/omarchy/plugins/gg.omapass
+ln -s "$PWD" ~/.config/omarchy/plugins/gg.omapass
 omarchy plugin enable gg.omapass
 ```
 
@@ -219,10 +238,14 @@ omarchy plugin disable gg.omapass   # keep it installed, take it off the bar
 omarchy plugin remove gg.omapass    # remove it entirely
 ```
 
-Removal takes nothing else with it. OmaPass writes only to
+Removal takes nothing else with it. On your machine OmaPass writes only to
 `$XDG_RUNTIME_DIR/omapass-*`, which is tmpfs and gone at logout; you can clear
-it immediately with `./omapass-agent.py lock`. It never edits your 1Password
-data, your `op` configuration, or any file outside its own plugin directory.
+it immediately with `./omapass-agent.py lock`. It touches no file outside its
+own plugin directory and never changes your `op` configuration.
+
+It does change your vault, but only when you ask it to: creating, editing and
+archiving items are the write features described above. It makes no change to
+an item you did not edit, and nothing at all until you press save.
 
 ## Compatibility
 
@@ -232,8 +255,10 @@ will not load the widget. `omarchy plugin validate .` checks the manifest
 against the shell your machine is actually running.
 
 External dependencies, all invoked as separate processes and none bundled:
-`op` (1Password CLI), `wl-copy` (wl-clipboard), and optionally `wtype` for
-auto-type, `notify-send` for notifications, and `xdg-open` for websites.
+`op` (1Password CLI), `wl-copy` and `wl-paste` (both from wl-clipboard; the
+paste side is how a wipe checks the clipboard still holds the secret rather
+than something you copied since), and optionally `wtype` for auto-type,
+`notify-send` for notifications, and `xdg-open` for websites.
 
 ## CLI Usage
 

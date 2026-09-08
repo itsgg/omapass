@@ -82,9 +82,10 @@ BorderSurface {
         text: root.showingValue
           ? Model.displayValue(root.modelData)
           : Model.maskText(root.modelData.value)
-        font.family: root.showingValue
-          ? "JetBrainsMono Nerd Font, monospace"
-          : root.theme.fontFamily
+        // The shell's own family, never a hardcoded one: Omarchy aliases it
+        // through fontconfig so `omarchy font set` moves every widget at
+        // once, and naming a family here would leave these values behind.
+        font.family: root.theme.fontFamily
         font.pixelSize: Style.font.body
         color: root.theme.foreground
         elide: Text.ElideRight

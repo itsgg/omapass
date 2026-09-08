@@ -69,7 +69,13 @@ def main():
     if args.command == "serve":
         run_daemon()
     elif args.command == "_wipe":
-        run_wipe_worker(args.delay, os.environ.get("OMAPASS_WIPE_TOKEN", ""))
+        # Both travel in the environment, never argv: /proc/<pid>/cmdline is
+        # world-readable, environ is not.
+        run_wipe_worker(
+            args.delay,
+            os.environ.get("OMAPASS_WIPE_TOKEN", ""),
+            os.environ.get("OMAPASS_WIPE_DIGEST", ""),
+        )
     elif args.command == "request":
         payload = args.json_payload
         if payload == "-":

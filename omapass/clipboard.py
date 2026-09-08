@@ -4,9 +4,16 @@ A copy is only safe if something removes it. Ownership is a token file: the
 newest copy writes it, and a wipe worker only clears the clipboard if the token
 it was given is still the current one. That is what stops an old timer wiping a
 credential the user copied a second ago.
+
+The token only speaks for copies made through here. The user copying something
+of their own takes the secret off the clipboard just as effectively, and a
+worker that cleared on the token alone destroyed whatever they had copied in
+the meantime. So a wipe also checks that the clipboard still holds the value it
+was sent to remove, by fingerprint, never by keeping the secret around.
 """
 
 import fcntl
+import hashlib
 import os
 import signal
 import subprocess
@@ -48,6 +55,44 @@ def cancel_previous_wipe() -> None:
                 pass
 
 
+def digest_of(value: str) -> str:
+    """Fingerprint of a copied value, for recognising it on the clipboard later."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def clipboard_holds(digest: str, timeout: float = 3.0) -> bool:
+    """Whether the clipboard still holds the value that digest came from.
+
+    A wipe exists to remove our secret, and once the user has copied something
+    else the secret is already gone: clearing then destroys their data and
+    protects nothing. `wl-paste --no-newline` returns the stored bytes exactly
+    (the flag suppresses an appended newline rather than stripping one), and it
+    can read a --sensitive copy, so the comparison is exact.
+
+    Unknowable cases resolve towards clearing. Being unable to read the
+    clipboard is not evidence the secret has gone.
+    """
+    if not digest:
+        return True
+    try:
+        res = subprocess.run(
+            ["wl-paste", "--no-newline"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
+        )
+    except Exception:
+        return True
+    if res.returncode != 0:
+        # wl-paste reports an empty clipboard and an unreachable compositor
+        # identically: exit 1, differing only in a stderr string. Reading the
+        # second as "the secret has gone" would skip the clear and the warning
+        # that follows it. Clearing an already-empty clipboard costs nothing,
+        # so both resolve towards clearing.
+        return True
+    # A successful read that does not match is the only sound evidence that
+    # the secret is off the clipboard.
+    return hashlib.sha256(res.stdout).hexdigest() == digest
+
+
 def clear_clipboard_once(timeout: float = 3.0) -> bool:
     """Runs `wl-copy --clear`, returning whether it actually succeeded."""
     try:
@@ -82,18 +127,34 @@ def warn_clipboard_not_cleared() -> None:
         pass
 
 
-def wipe_clipboard_now() -> bool:
+def wipe_clipboard_now(digest: str = "") -> bool:
     """Clears the clipboard now and cancels any scheduled wipe. Returns success.
 
     The scheduled wipe is only cancelled once the clipboard is actually clear:
     tearing down the safety net and then failing to clear left the credential
     sitting there with nothing left to remove it.
+
+    `digest` names the value this is meant to remove, when the caller knows it.
+    Given one, a clipboard holding something else is left alone.
     """
+    if not digest and not token_path().exists():
+        # No copy of ours is outstanding: either this daemon never made one,
+        # or the wipe already took it off. Clearing now could have no effect
+        # except to destroy whatever the user has copied for themselves.
+        return True
+
     clp = clipboard_lock_path()
     try:
         with open_private(clp) as clf:
             fcntl.flock(clf, fcntl.LOCK_EX)
             try:
+                if not clipboard_holds(digest):
+                    # The user has copied something since. Our secret is
+                    # already off the clipboard, so there is nothing to take
+                    # off it, and taking their data off would be the only
+                    # effect this could have.
+                    cancel_previous_wipe()
+                    return True
                 cleared = False
                 for attempt in range(2):
                     if attempt:
@@ -113,7 +174,7 @@ def wipe_clipboard_now() -> bool:
         return clear_clipboard_once()
 
 
-def run_wipe_worker(delay_seconds: int, token: str) -> None:
+def run_wipe_worker(delay_seconds: int, token: str, digest: str = "") -> None:
     """Clears the clipboard after delay_seconds, unless a newer copy superseded us.
 
     Ownership is the token file: a later copy overwrites it, so the older
@@ -126,8 +187,9 @@ def run_wipe_worker(delay_seconds: int, token: str) -> None:
     tp = token_path()
 
     # One lock acquisition per attempt, never held across a sleep: a concurrent
-    # copy waits only for the clear itself, and a copy landing between attempts
-    # takes over the token, which ends this worker's job on the next pass.
+    # copy waits only for the clipboard read and the clear, and a copy landing
+    # between attempts takes over the token, which ends this worker's job on
+    # the next pass.
     for delay in WIPE_RETRY_DELAYS:
         with open_private(clipboard_lock_path()) as clf:
             fcntl.flock(clf, fcntl.LOCK_EX)
@@ -137,6 +199,18 @@ def run_wipe_worker(delay_seconds: int, token: str) -> None:
                 except OSError:
                     return
                 if current != token:
+                    return
+
+                # The token only proves no later copy of ours superseded this
+                # one. It says nothing about the user copying something of
+                # their own in the meantime, which takes the secret off the
+                # clipboard just as effectively and must not be clobbered.
+                if not clipboard_holds(digest):
+                    for path in (tp, wipe_pid_path()):
+                        try:
+                            path.unlink()
+                        except OSError:
+                            pass
                     return
 
                 if clear_clipboard_once():

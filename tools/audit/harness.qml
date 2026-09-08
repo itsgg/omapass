@@ -99,6 +99,99 @@ ShellRoot {
   // The popup is opened first and the state applied after: PopupCard's
   // onOpenChanged resets currentView to "list", so anything set before the
   // open is thrown away.
+  // Walks the keyboard focus chain and logs every stop it finds.
+  //
+  // Tab order is the one part of the UI a screenshot cannot show: a control
+  // that Tab skips looks identical to one it reaches. Enumerating the chain
+  // makes it checkable, which is how the note editor being unreachable was
+  // found in the first place.
+  function reportTabOrder() {
+    var seen = []
+    var start = harness.state.indexOf("tab-order-view") === 0
+      ? widget.popupContentItem
+      : widget.createFormItem
+    if (!start) {
+      console.log("TAB-ORDER " + harness.state + " => no form")
+      return
+    }
+    var it = start.nextItemInFocusChain(true)
+    var first = it
+    for (var i = 0; i < 40 && it; i++) {
+      var name = String(it).split("(")[0].split("_QMLTYPE")[0]
+      var tag = name
+      if (it.spec !== undefined && it.spec && it.spec.id) {
+        tag += ":" + it.spec.id
+      } else if (it.text !== undefined) {
+        var t = String(it.text)
+        if (t.length > 0 && t.length < 24) tag += ":" + t
+      }
+      seen.push(tag)
+      var nxt = it.nextItemInFocusChain(true)
+      if (!nxt || nxt === it || nxt === first) break
+      it = nxt
+    }
+    console.log("TAB-ORDER " + harness.state + " => " + seen.join("  >  "))
+  }
+
+  Timer {
+    id: focusNoteTimer
+    interval: 600
+    running: false
+    repeat: false
+    onTriggered: harness.focusNote()
+  }
+
+  // Fires after tabkey.sh has had time to send the key.
+  Timer {
+    id: afterTabTimer
+    interval: 4000
+    running: harness.state === "tab-key-note"
+    repeat: false
+    onTriggered: harness.reportAfterTab()
+  }
+
+  Timer {
+    id: tabOrderTimer
+    interval: 600
+    running: false
+    repeat: false
+    onTriggered: harness.reportTabOrder()
+  }
+
+  // Where the note editor is, once found, so the post-Tab report can read it.
+  property var noteRef: null
+
+  // Focus the note editor and say so. Paired with a real Tab keypress from
+  // tabkey.sh: reportTabOrder walks Qt's static focus graph, which cannot see
+  // a widget swallowing the Tab key as text input rather than passing it on.
+  function focusNote() {
+    var start = widget.createFormItem
+    if (!start) { console.log("TAB-KEY no form"); return }
+    var it = start.nextItemInFocusChain(true)
+    var first = it
+    for (var i = 0; i < 40 && it; i++) {
+      if (String(it).indexOf("QQuickTextEdit") === 0) {
+        harness.noteRef = it
+        it.forceActiveFocus()
+        console.log("TAB-KEY before: focus=" + String(it) + " text=[" + it.text + "]")
+        return
+      }
+      var nxt = it.nextItemInFocusChain(true)
+      if (!nxt || nxt === it || nxt === first) break
+      it = nxt
+    }
+    console.log("TAB-KEY no note editor found")
+  }
+
+  function reportAfterTab() {
+    var af = widget.popupContentItem.Window.activeFocusItem
+    var note = harness.noteRef
+    var moved = af !== note
+    console.log("TAB-KEY after: focus=" + String(af)
+      + " noteText=[" + (note ? note.text : "?") + "]"
+      + " movedOffNote=" + moved)
+  }
+
   function openPopup() {
     widget.unlocked = harness.state.indexOf("locked") !== 0 && harness.state !== "demo-locked"
     widget.popupOpen = true
@@ -228,6 +321,35 @@ ShellRoot {
     if (harness.state === "create") {
       widget.vaults = [{ id: "v1", name: "Personal" }, { id: "v2", name: "Work" }]
       widget.startCreate("GitHub")
+    }
+    // The other two views have their own key models (arrows plus letters), so
+    // what matters there is that Tab cannot strand focus somewhere those
+    // handlers no longer see it.
+    if (harness.state === "tab-order-view-details") {
+      widget.selectedItem = harness.loginItem
+      widget.itemDetails = harness.detailsFixture("details")
+      widget.currentView = "details"
+      tabOrderTimer.running = true
+    }
+    if (harness.state === "tab-order-view-list") {
+      widget.items = [harness.loginItem, harness.cardItem]
+      widget.currentView = "list"
+      tabOrderTimer.running = true
+    }
+    if (harness.state === "tab-key-note") {
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startCreate("Recovery codes")
+      widget.setCreateCategory("SECURE_NOTE")
+      focusNoteTimer.running = true
+    }
+    if (harness.state.indexOf("tab-order") === 0
+        && harness.state.indexOf("tab-order-view") !== 0) {
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startCreate("Recovery codes")
+      widget.setCreateCategory(
+        harness.state === "tab-order-note" ? "SECURE_NOTE"
+          : (harness.state === "tab-order-card" ? "CREDIT_CARD" : "LOGIN"))
+      tabOrderTimer.running = true
     }
     if (harness.state === "create-empty") {
       widget.vaults = [{ id: "v1", name: "Personal" }]

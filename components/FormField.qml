@@ -30,7 +30,15 @@ ColumnLayout {
   readonly property bool isMultiline: kind === "multiline"
   // Only the field the category can have generated offers the toggle.
   property bool generatable: false
-  property alias input: field
+
+  // The editor actually on screen for this field. This was an alias to the
+  // single-line one, so focusing a note aimed at an invisible widget, and a
+  // validation error on a note moved the caret nowhere the user could see.
+  // Null when 1Password is generating the value and there is nothing to type
+  // into; callers already guard for that.
+  readonly property Item input: root.isMultiline
+    ? noteArea
+    : ((root.isSecret && root.generatable && root.generated) ? null : field)
 
   // Inert while a save is in flight. Ignoring the edits was not enough: the
   // text kept accepting them, so what was on screen stopped matching what a
@@ -69,6 +77,7 @@ ColumnLayout {
     Button {
       visible: root.isSecret && root.generatable
       text: root.generated ? "Type it" : "Generate"
+      focusable: true
       accent: root.theme.accent
       horizontalPadding: Style.space(8)
       verticalPadding: Style.space(2)
@@ -133,6 +142,24 @@ ColumnLayout {
       TextEdit {
         id: noteArea
         width: parent.width
+        // Qt Quick Controls sets this for TextField, but a bare TextEdit
+        // defaults it to false, so Tab walked straight past the note.
+        activeFocusOnTab: true
+        // And a bare TextEdit takes Tab as a literal tab character, so
+        // enabling the above alone turned the note from unreachable into
+        // inescapable: focus entered and never left, putting the vault,
+        // Cancel and Save out of keyboard reach. In a form Tab means the
+        // next field; a tab character in a note can be pasted.
+        Keys.onTabPressed: function(event) {
+          var next = noteArea.nextItemInFocusChain(true)
+          if (next) next.forceActiveFocus()
+          event.accepted = true
+        }
+        Keys.onBacktabPressed: function(event) {
+          var prev = noteArea.nextItemInFocusChain(false)
+          if (prev) prev.forceActiveFocus()
+          event.accepted = true
+        }
         text: root.value
         font.family: root.theme.fontFamily
         font.pixelSize: Style.font.body
