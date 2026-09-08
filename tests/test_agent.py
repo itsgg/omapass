@@ -194,6 +194,55 @@ class TestOmaPassService(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertEqual(res["field"], "Password")
 
+    @patch("subprocess.run")
+    def test_fetch_field_reads_from_item_cache(self, mock_run):
+        self.service.item_details_cache["item123"] = {
+            "timestamp": 123456,
+            "data": {
+                "id": "item123",
+                "title": "Amazon",
+                "totp": "654321",
+                "fields": [
+                    {"id": "username", "label": "username", "value": "myuser@example.com", "purpose": "USERNAME"},
+                    {"id": "password", "label": "password", "value": "cachedsecretpass", "purpose": "PASSWORD"},
+                ],
+            },
+        }
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            ok_pw, pw = self.service.fetch_field("item123", "password")
+            self.assertTrue(ok_pw)
+            self.assertEqual(pw, "cachedsecretpass")
+
+            ok_user, user = self.service.fetch_field("item123", "username")
+            self.assertTrue(ok_user)
+            self.assertEqual(user, "myuser@example.com")
+
+            ok_totp, totp = self.service.fetch_field("item123", "otp")
+            self.assertTrue(ok_totp)
+            self.assertEqual(totp, "654321")
+
+            # subprocess.run must not be called when item is in cache
+            mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_get_status_locked_fast_account_list(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = '[{"email": "ganesh@example.com", "url": "my.1password.com", "user_uuid": "U123"}]'
+        mock_run.return_value = mock_proc
+
+        self.service.is_unlocked = False
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=False)
+            self.assertTrue(status["ok"])
+            self.assertFalse(status["unlocked"])
+            self.assertEqual(status["account"], "ganesh@example.com")
+            # Should have called op account list, NOT op user get
+            mock_run.assert_called_once()
+            self.assertEqual(mock_run.call_args[0][0], ["op", "account", "list", "--format=json"])
+
 
 if __name__ == "__main__":
     unittest.main()

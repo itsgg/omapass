@@ -187,11 +187,36 @@ class OmaPassService:
     def check_op_installed(self) -> bool:
         return shutil.which("op") is not None
 
+    def get_account_info_fast(self) -> Optional[Dict[str, str]]:
+        """Quickly retrieves account info via `op account list` which never prompts on desktop."""
+        try:
+            res = subprocess.run(
+                ["op", "account", "list", "--format=json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2.5,
+            )
+            if res.returncode == 0:
+                accounts = json.loads(res.stdout)
+                if accounts and isinstance(accounts, list):
+                    acc = accounts[0]
+                    return {
+                        "email": acc.get("email", ""),
+                        "url": acc.get("url", ""),
+                        "user_id": acc.get("user_uuid", ""),
+                        "name": acc.get("email", ""),
+                    }
+        except Exception:
+            pass
+        return None
+
     def get_status(self, force: bool = False) -> Dict[str, Any]:
         """Checks 1Password CLI status and unlock state with fast cache."""
         now = time.time()
         with self.lock:
-            if not force and self.is_unlocked and (now - self.last_status_check < 60.0):
+            # Once unlocked, return cached state immediately. Never poll `op` in background!
+            if not force and self.is_unlocked:
                 return {
                     "ok": True,
                     "installed": True,
@@ -211,6 +236,25 @@ class OmaPassService:
                 "unlocked": False,
                 "error": "1Password CLI (op) is not installed.",
             }
+
+        # If not forcing unlock and not unlocked, retrieve account info without triggering a prompt
+        if not force and not self.is_unlocked:
+            fast_info = self.get_account_info_fast()
+            if fast_info:
+                with self.lock:
+                    self.account_info = fast_info
+                    return {
+                        "ok": True,
+                        "installed": True,
+                        "unlocked": False,
+                        "account": fast_info.get("email", ""),
+                        "name": fast_info.get("name", ""),
+                        "server": fast_info.get("url", ""),
+                        "userId": fast_info.get("user_id", ""),
+                        "itemCount": len(self.items),
+                        "lastSync": self.last_sync_time,
+                        "message": "Vault is locked or unauthorized.",
+                    }
 
         try:
             # Check status via `op user get --me` (1Password desktop app integration)
@@ -505,6 +549,23 @@ class OmaPassService:
             return False, "op CLI not installed"
 
         field = field.lower().strip()
+
+        # Check in-memory item details cache first
+        with self.lock:
+            cached = self.item_details_cache.get(item_id)
+            if cached and "data" in cached:
+                item_data = cached["data"]
+                if field == "otp" and item_data.get("totp"):
+                    return True, item_data["totp"]
+                for f in item_data.get("fields", []):
+                    f_purp = str(f.get("purpose", "")).upper()
+                    f_lbl = str(f.get("label", "")).lower()
+                    f_id = str(f.get("id", "")).lower()
+                    if field == "password" and (f_purp == "PASSWORD" or "password" in f_lbl or "password" in f_id or "pin" in f_lbl):
+                        return True, str(f.get("value", ""))
+                    if field == "username" and (f_purp == "USERNAME" or "username" in f_lbl or "username" in f_id or "email" in f_lbl):
+                        return True, str(f.get("value", ""))
+
         cmd: List[str] = []
 
         if field == "otp":
@@ -683,10 +744,9 @@ class OmaPassService:
         if not self.check_op_installed():
             return {"ok": False, "error": "op CLI not installed"}
 
-        now = time.time()
         with self.lock:
             cached = self.item_details_cache.get(item_id)
-            if cached and (now - cached["timestamp"] < 300.0):
+            if cached and "data" in cached:
                 return {"ok": True, "item": cached["data"]}
 
         try:
@@ -786,20 +846,6 @@ class OmaPassService:
 
             fields_list.sort(key=_field_priority)
 
-            if has_otp and not totp_code:
-                try:
-                    otp_res = subprocess.run(
-                        ["op", "item", "get", item_id, "--otp"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        timeout=5.0,
-                    )
-                    if otp_res.returncode == 0:
-                        totp_code = otp_res.stdout.strip()
-                except Exception:
-                    pass
-
             item_data = {
                 "id": item_id,
                 "title": title,
@@ -815,7 +861,7 @@ class OmaPassService:
 
             with self.lock:
                 self.item_details_cache[item_id] = {
-                    "timestamp": now,
+                    "timestamp": time.time(),
                     "data": item_data,
                 }
 
@@ -1029,16 +1075,20 @@ def handle_request(req: Dict[str, Any]):
     """Dispatches request via daemon socket, auto-starting daemon if needed, with structured error handling."""
     try:
         ensure_daemon()
-        timeout = 35.0 if req.get("action") == "sync" else 10.0
+        action = req.get("action", "")
+        timeout = 40.0 if action in ("sync", "get_item", "unlock", "copy", "type") else 10.0
         resp = send_socket_request(req, timeout=timeout)
         if resp is not None:
             print(json.dumps(resp))
             return
 
-        # Direct fallback if socket failed
-        service = OmaPassService()
-        resp = service.dispatch(req)
-        print(json.dumps(resp))
+        # Direct fallback only if daemon socket is unreachable
+        if not socket_path().exists():
+            service = OmaPassService()
+            resp = service.dispatch(req)
+            print(json.dumps(resp))
+        else:
+            print(json.dumps({"ok": False, "error": "Request timed out waiting for 1Password response"}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
 

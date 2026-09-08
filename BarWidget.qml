@@ -63,7 +63,6 @@ BarWidget {
 
   Component.onCompleted: {
     checkStatus()
-    refreshItems()
   }
 
   // Toast feedback timer
@@ -241,7 +240,8 @@ BarWidget {
 
   function unlock() {
     runAction({ action: "unlock" })
-    checkTimer.restart()
+    unlockPollTimer.attempts = 0
+    unlockPollTimer.running = true
   }
 
   function lockVault() {
@@ -311,13 +311,22 @@ BarWidget {
     onTriggered: root.refreshItems()
   }
 
-  // Periodic status poll
+  // Unlock polling timer — only runs temporarily after clicking Unlock until unlocked or 15s elapsed
   Timer {
-    id: checkTimer
-    interval: root.popupOpen ? 2500 : 15000
-    running: true
+    id: unlockPollTimer
+    interval: 1500
+    running: false
     repeat: true
-    onTriggered: root.checkStatus()
+    property int attempts: 0
+    onTriggered: {
+      attempts++
+      if (root.unlocked || attempts >= 10 || !root.popupOpen) {
+        running = false
+        attempts = 0
+      } else {
+        root.checkStatus()
+      }
+    }
   }
 
   implicitWidth: button.implicitWidth
@@ -363,7 +372,9 @@ BarWidget {
       if (open) {
         root.currentView = "list"
         root.checkStatus()
-        root.refreshItems()
+        if (root.unlocked) {
+          root.refreshItems()
+        }
         Qt.callLater(function() {
           if (root.unlocked) {
             searchInput.forceActiveFocus()
@@ -1059,101 +1070,95 @@ BarWidget {
       }
 
       // ========================================== UNLOCKED: DETAILS VIEW
-      ColumnLayout {
+      Item {
         id: detailsViewArea
         visible: root.unlocked && root.currentView === "details"
         Layout.fillWidth: true
         Layout.fillHeight: true
-        spacing: Style.space(8)
 
         // Loading Indicator (Pixel-Perfect Mathematical Centering)
-        Item {
+        ColumnLayout {
           visible: root.loadingDetails
-          Layout.fillWidth: true
-          Layout.fillHeight: true
+          anchors.centerIn: parent
+          spacing: Style.space(14)
 
-          ColumnLayout {
-            anchors.centerIn: parent
-            spacing: Style.space(14)
-
-            Item {
-              Layout.alignment: Qt.AlignHCenter
-              width: Style.space(40)
-              height: Style.space(40)
-
-              Text {
-                anchors.centerIn: parent
-                text: "󰦖"
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(32)
-                color: root.colAccent
-                transformOrigin: Item.Center
-
-                RotationAnimator on rotation {
-                  from: 0
-                  to: 360
-                  duration: 900
-                  loops: Animation.Infinite
-                  running: root.loadingDetails
-                }
-              }
-            }
+          Item {
+            Layout.alignment: Qt.AlignHCenter
+            width: Style.space(40)
+            height: Style.space(40)
 
             Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: "Loading item details..."
+              anchors.centerIn: parent
+              text: "󰦖"
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-              color: root.colForeground
+              font.pixelSize: Style.space(32)
+              color: root.colAccent
+              transformOrigin: Item.Center
+
+              RotationAnimator on rotation {
+                from: 0
+                to: 360
+                duration: 900
+                loops: Animation.Infinite
+                running: root.loadingDetails
+              }
             }
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "Loading item details..."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            color: root.colForeground
           }
         }
 
         // Error State (Centered)
-        Item {
+        ColumnLayout {
           visible: !root.loadingDetails && !!root.detailsError
-          Layout.fillWidth: true
-          Layout.fillHeight: true
+          anchors.centerIn: parent
+          spacing: Style.space(10)
 
-          ColumnLayout {
-            anchors.centerIn: parent
-            spacing: Style.space(10)
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "󰅙"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(34)
+            color: Color.negative || "#e06c75"
+          }
 
-            Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: "󰅙"
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(34)
-              color: Color.negative || "#e06c75"
-            }
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: root.detailsError
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.colForeground
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            Layout.maximumWidth: Style.space(380)
+          }
 
-            Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: root.detailsError
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              color: root.colForeground
-              wrapMode: Text.Wrap
-              horizontalAlignment: Text.AlignHCenter
-              Layout.maximumWidth: Style.space(380)
-            }
-
-            Button {
-              Layout.alignment: Qt.AlignHCenter
-              text: "Retry"
-              iconText: "󰑐"
-              accent: root.colAccent
-              onClicked: {
-                if (root.selectedItem) root.showItemDetails(root.selectedItem)
-              }
+          Button {
+            Layout.alignment: Qt.AlignHCenter
+            text: "Retry"
+            iconText: "󰑐"
+            accent: root.colAccent
+            onClicked: {
+              if (root.selectedItem) root.showItemDetails(root.selectedItem)
             }
           }
         }
 
-        // Scrollable Details Body
-        Flickable {
-          id: detailsFlick
+        // Scrollable Details Body and Content Footer
+        ColumnLayout {
+          visible: !root.loadingDetails && !root.detailsError && !!root.itemDetails
+          anchors.fill: parent
+          spacing: Style.space(8)
+
+          Flickable {
+            id: detailsFlick
           visible: !root.loadingDetails && !root.detailsError && !!root.itemDetails
           Layout.fillWidth: true
           Layout.fillHeight: true
