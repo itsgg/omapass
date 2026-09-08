@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import importlib.util
 import json
 import os
+import sys
 import pathlib
 import tempfile
 import time
@@ -9,9 +9,37 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location("omapass_agent", ROOT / "omapass-agent.py")
-agent = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(agent)
+sys.path.insert(0, str(ROOT))
+
+from omapass import clipboard, fields, paths, service  # noqa: E402
+
+
+class _AgentFacade:
+    """Back-compat surface so tests can reach helpers by their old names.
+
+    Patching still has to target the module that *uses* a name, so tests that
+    mock behaviour patch `clipboard`/`service` directly; this only spares the
+    assertions from spelling out a module for every constant.
+    """
+
+    OmaPassService = service.OmaPassService
+    DETAILS_CACHE_TTL = service.DETAILS_CACHE_TTL
+    UNLOCK_CACHE_TTL = service.UNLOCK_CACHE_TTL
+    WIPE_RETRY_DELAYS = clipboard.WIPE_RETRY_DELAYS
+    cache_path = staticmethod(paths.cache_path)
+    token_path = staticmethod(paths.token_path)
+    wipe_pid_path = staticmethod(paths.wipe_pid_path)
+    write_private = staticmethod(paths.write_private)
+    is_our_wipe_process = staticmethod(paths.is_our_wipe_process)
+    cancel_previous_wipe = staticmethod(clipboard.cancel_previous_wipe)
+    run_wipe_worker = staticmethod(clipboard.run_wipe_worker)
+    clear_clipboard_once = staticmethod(clipboard.clear_clipboard_once)
+    warn_clipboard_not_cleared = staticmethod(clipboard.warn_clipboard_not_cleared)
+    wipe_clipboard_now = staticmethod(clipboard.wipe_clipboard_now)
+    totp_period_from_uri = staticmethod(fields.totp_period_from_uri)
+
+
+agent = _AgentFacade
 
 
 class IsolatedRuntimeDir(unittest.TestCase):
@@ -422,9 +450,9 @@ class TestOmaPassService(IsolatedRuntimeDir):
             {"id": "validFrom", "type": "MONTH_YEAR", "label": "valid from", "value": "202001"},
             {"id": "expiry", "type": "MONTH_YEAR", "label": "expires", "value": "202812"},
         ]}
-        self.assertEqual(self.service._match_field(item, "cvv"), "123")
-        self.assertEqual(self.service._match_field(item, "ccnum"), "4242424242424242")
-        self.assertEqual(self.service._match_field(item, "expiry"), "202812")
+        self.assertEqual(fields.match_field(item, "cvv"), "123")
+        self.assertEqual(fields.match_field(item, "ccnum"), "4242424242424242")
+        self.assertEqual(fields.match_field(item, "expiry"), "202812")
 
     def test_expiry_not_shadowed_by_another_month_year_field(self):
         """Two MONTH_YEAR fields: the one that says expiry has to win."""
@@ -432,27 +460,27 @@ class TestOmaPassService(IsolatedRuntimeDir):
             {"id": "validFrom", "type": "MONTH_YEAR", "label": "valid from", "value": "202001"},
             {"id": "custom_1", "type": "MONTH_YEAR", "label": "expiration date", "value": "202812"},
         ]}
-        self.assertEqual(self.service._match_field(item, "expiry"), "202812")
+        self.assertEqual(fields.match_field(item, "expiry"), "202812")
 
     def test_custom_cvv_label_is_found(self):
         item = {"fields": [
             {"id": "custom_9", "type": "CONCEALED", "label": "CVV code", "value": "321"},
         ]}
-        self.assertEqual(self.service._match_field(item, "cvv"), "321")
+        self.assertEqual(fields.match_field(item, "cvv"), "321")
 
     def test_field_matching_falls_back_to_type_only(self):
         """With no better signal, the type is still enough to find the field."""
         item = {"fields": [
             {"id": "custom1", "type": "CREDIT_CARD_NUMBER", "label": "the number", "value": "4242424242424242"},
         ]}
-        self.assertEqual(self.service._match_field(item, "ccnum"), "4242424242424242")
+        self.assertEqual(fields.match_field(item, "ccnum"), "4242424242424242")
 
     def test_field_matching_ignores_empty_values(self):
         item = {"fields": [
             {"id": "password", "purpose": "PASSWORD", "label": "password", "value": ""},
             {"id": "other", "type": "CONCEALED", "label": "passphrase", "value": "real"},
         ]}
-        self.assertEqual(self.service._match_field(item, "password"), "real")
+        self.assertEqual(fields.match_field(item, "password"), "real")
 
     def test_fetch_field_rejects_malformed_field_name(self):
         """A field name is either canonical or a plain field id, nothing else."""
@@ -583,7 +611,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_popen.side_effect = [wl_copy, OSError("no fork for you")]
 
         with patch("shutil.which", return_value="/usr/bin/wl-copy"):
-            with patch.object(agent, "clear_clipboard_once", return_value=True) as mock_clear:
+            with patch.object(service, "clear_clipboard_once", return_value=True) as mock_clear:
                 res = self.service.copy_to_clipboard(value="topsecret", field="password", timeout_seconds=30)
 
         self.assertFalse(res["ok"])
@@ -594,8 +622,8 @@ class TestOmaPassService(IsolatedRuntimeDir):
         """A clear that never succeeds must warn, not silently give up."""
         agent.write_private(agent.token_path(), "mine")
         agent.write_private(agent.wipe_pid_path(), "1234")
-        with patch.object(agent, "clear_clipboard_once", return_value=False) as mock_clear:
-            with patch.object(agent, "warn_clipboard_not_cleared") as mock_warn:
+        with patch.object(clipboard, "clear_clipboard_once", return_value=False) as mock_clear:
+            with patch.object(clipboard, "warn_clipboard_not_cleared") as mock_warn:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine")
 
@@ -607,8 +635,8 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_wipe_worker_succeeds_on_a_retry(self):
         agent.write_private(agent.token_path(), "mine")
-        with patch.object(agent, "clear_clipboard_once", side_effect=[False, True]) as mock_clear:
-            with patch.object(agent, "warn_clipboard_not_cleared") as mock_warn:
+        with patch.object(clipboard, "clear_clipboard_once", side_effect=[False, True]) as mock_clear:
+            with patch.object(clipboard, "warn_clipboard_not_cleared") as mock_warn:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine")
 
@@ -623,7 +651,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             agent.write_private(agent.token_path(), "newer")
             return False
 
-        with patch.object(agent, "clear_clipboard_once", side_effect=steal_token) as mock_clear:
+        with patch.object(clipboard, "clear_clipboard_once", side_effect=steal_token) as mock_clear:
             with patch("time.sleep"):
                 agent.run_wipe_worker(0, "mine")
 
@@ -640,8 +668,8 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_popen.side_effect = [wl_copy, OSError("no fork for you")]
 
         with patch("shutil.which", return_value="/usr/bin/wl-copy"):
-            with patch.object(agent, "clear_clipboard_once", return_value=False):
-                with patch.object(agent, "warn_clipboard_not_cleared") as mock_warn:
+            with patch.object(service, "clear_clipboard_once", return_value=False):
+                with patch.object(service, "warn_clipboard_not_cleared") as mock_warn:
                     res = self.service.copy_to_clipboard(value="topsecret", field="password", timeout_seconds=30)
 
         self.assertFalse(res["ok"])
@@ -687,7 +715,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             {"id": "note_1", "type": "STRING", "label": "recovery_code", "value": "decoy"},
             {"id": "recovery_code", "type": "CONCEALED", "label": "Recovery", "value": "real"},
         ]}
-        self.assertEqual(self.service._match_field(item, "recovery_code"), "real")
+        self.assertEqual(fields.match_field(item, "recovery_code"), "real")
 
     def test_copy_refuses_once_the_vault_locked_mid_request(self):
         self.service.lock_epoch = 5
@@ -733,7 +761,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.is_unlocked)
 
     def test_lock_reports_failure_when_nothing_actually_locked(self):
-        with patch.object(agent, "wipe_clipboard_now", return_value=True):
+        with patch.object(service, "wipe_clipboard_now", return_value=True):
             with patch("shutil.which", return_value="/usr/bin/1password"):
                 with patch("subprocess.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
@@ -756,7 +784,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_lock_reports_failure_when_only_signout_was_possible_and_failed(self):
         """1Password not installed: the signout result is then the whole verdict."""
-        with patch.object(agent, "wipe_clipboard_now", return_value=True):
+        with patch.object(service, "wipe_clipboard_now", return_value=True):
             with patch("shutil.which", return_value=None):
                 with patch("subprocess.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
@@ -771,7 +799,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             return True
 
         before = self.service.lock_epoch
-        with patch.object(agent, "wipe_clipboard_now", side_effect=record):
+        with patch.object(service, "wipe_clipboard_now", side_effect=record):
             with patch("shutil.which", return_value=None):
                 with patch("subprocess.run", return_value=MagicMock(returncode=0)):
                     self.service.lock_vault()
@@ -792,12 +820,12 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertEqual(self.service.item_details_cache, {})
 
     def test_normalize_url(self):
-        self.assertEqual(self.service.normalize_url("github.com"), "https://github.com")
-        self.assertEqual(self.service.normalize_url("http://x.test/a"), "http://x.test/a")
-        self.assertEqual(self.service.normalize_url("//x.test"), "https://x.test")
-        self.assertIsNone(self.service.normalize_url("file:///etc/passwd"))
-        self.assertIsNone(self.service.normalize_url("javascript:alert(1)"))
-        self.assertIsNone(self.service.normalize_url("   "))
+        self.assertEqual(fields.normalize_url("github.com"), "https://github.com")
+        self.assertEqual(fields.normalize_url("http://x.test/a"), "http://x.test/a")
+        self.assertEqual(fields.normalize_url("//x.test"), "https://x.test")
+        self.assertIsNone(fields.normalize_url("file:///etc/passwd"))
+        self.assertIsNone(fields.normalize_url("javascript:alert(1)"))
+        self.assertIsNone(fields.normalize_url("   "))
 
     def test_open_url_refuses_non_web_scheme(self):
         res = self.service.open_url("file:///etc/passwd")
@@ -833,7 +861,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_cancel_previous_wipe_ignores_foreign_pid(self):
         """PID reuse must not turn a stale pid file into a kill of someone else's process."""
         agent.write_private(agent.wipe_pid_path(), str(os.getpid()))
-        with patch.object(agent, "is_our_wipe_process", return_value=False):
+        with patch.object(clipboard, "is_our_wipe_process", return_value=False):
             with patch("os.kill") as mock_kill:
                 agent.cancel_previous_wipe()
         mock_kill.assert_not_called()

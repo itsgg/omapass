@@ -195,6 +195,44 @@ authorization dialog. Pass `{"action": "status", "force": true}` to actually
 ask `op` and accept that prompt, which is what the widget does after you click
 **Unlock**.
 
+## Layout
+
+```
+BarWidget.qml        state, the helper processes, and the composition
+components/          one file per piece of the popup, each renderable alone
+Model.js             pure functions: category actions, icons, value formatting
+omapass-agent.py     entry point only
+omapass/             the helper, one module per concern
+  config.py            tunables and the vocabulary matched against
+  paths.py             the private runtime directory and how files open there
+  clipboard.py         putting a secret on the clipboard and taking it off
+  fields.py            resolving "the password" to a field of a real item
+  service.py           vault state, caching, and the actions the widget calls
+  daemon.py            the Unix socket and the process behind it
+  cli.py               argument parsing and the stdin request path
+tools/audit/         renders every UI state and screenshots it
+tools/check_manifest.py
+tests/               Python, and Model.js under node
+```
+
+## Development
+
+```bash
+make check      # everything CI runs
+make test       # Python + Model.js
+make validate   # the shell's own plugin checks
+make audit      # render every UI state and screenshot it
+```
+
+`make test-python` runs with `PATH` unset on purpose. The helper shells out to
+`op`, `wl-copy` and `wtype`, and a test that quietly takes a different branch
+when those are missing is a test that only passes on the author's machine.
+
+`make audit` exists because a headless load check proves very little about a
+UI. It accepted a toast nested inside an invisible view, a locked card centred
+in the left half of its own popup, and a footer running through the label
+beside it. Those were found by looking at the pixels.
+
 ## Running the tests
 
 ```bash

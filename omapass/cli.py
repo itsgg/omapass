@@ -1,0 +1,89 @@
+"""Command line entry: the subcommands, and the one that reads stdin.
+
+`request -` takes its JSON on stdin rather than as an argument, because an
+argument is visible to every process on the machine and these arguments carry
+credentials.
+"""
+
+import argparse
+import json
+import sys
+
+from .config import DEFAULT_CLIPBOARD_TIMEOUT, MAX_CLIPBOARD_TIMEOUT
+from .clipboard import run_wipe_worker
+from .daemon import handle_request, run_daemon
+import os
+
+def main():
+    parser = argparse.ArgumentParser(description="OmaPass 1Password Helper")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("serve", help="Run background socket daemon")
+
+    wipe_parser = subparsers.add_parser("_wipe", help=argparse.SUPPRESS)
+    wipe_parser.add_argument("delay", type=int)
+
+    req_parser = subparsers.add_parser("request", help="Send JSON request")
+    req_parser.add_argument(
+        "json_payload",
+        nargs="?",
+        default="{}",
+        help="JSON payload string, or '-' to read it from stdin. Prefer '-': "
+             "an argument is visible to every process on the machine.",
+    )
+
+    subparsers.add_parser("status", help="Get 1Password status")
+    subparsers.add_parser("unlock", help="Trigger unlock prompt")
+    subparsers.add_parser("lock", help="Lock vault")
+    subparsers.add_parser("sync", help="Sync item metadata")
+
+    list_parser = subparsers.add_parser("list", help="List and search items")
+    list_parser.add_argument("query", nargs="?", default="", help="Search query")
+    list_parser.add_argument("--category", "-c", default="", help="Category filter")
+
+    copy_parser = subparsers.add_parser("copy", help="Copy field to clipboard")
+    copy_parser.add_argument("id", help="Item ID")
+    copy_parser.add_argument("field", default="password", nargs="?", choices=["password", "username", "otp"])
+    copy_parser.add_argument("--title", "-t", default="", help="Item title")
+    copy_parser.add_argument("--timeout", type=int, default=DEFAULT_CLIPBOARD_TIMEOUT, help="Clipboard wipe timeout")
+
+    type_parser = subparsers.add_parser("type", help="Type field via wtype")
+    type_parser.add_argument("id", help="Item ID")
+    type_parser.add_argument("field", default="password", nargs="?", choices=["password", "username"])
+
+    args = parser.parse_args()
+
+    if args.command == "serve":
+        run_daemon()
+    elif args.command == "_wipe":
+        run_wipe_worker(args.delay, os.environ.get("OMAPASS_WIPE_TOKEN", ""))
+    elif args.command == "request":
+        payload = args.json_payload
+        if payload == "-":
+            payload = sys.stdin.read()
+        try:
+            req = json.loads(payload) if payload else {}
+        except json.JSONDecodeError as e:
+            print(json.dumps({"ok": False, "error": f"Invalid JSON: {e}"}))
+            sys.exit(1)
+        handle_request(req)
+    elif args.command == "status":
+        handle_request({"action": "status"})
+    elif args.command == "unlock":
+        handle_request({"action": "unlock"})
+    elif args.command == "lock":
+        handle_request({"action": "lock"})
+    elif args.command == "sync":
+        handle_request({"action": "sync"})
+    elif args.command == "list":
+        handle_request({"action": "list", "query": args.query, "category": args.category})
+    elif args.command == "copy":
+        handle_request({"action": "copy", "id": args.id, "field": args.field, "title": args.title, "timeout": args.timeout})
+    elif args.command == "type":
+        handle_request({"action": "type", "id": args.id, "field": args.field})
+    else:
+        handle_request({"action": "status"})
+
+
+if __name__ == "__main__":
+    main()

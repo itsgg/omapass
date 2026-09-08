@@ -6,6 +6,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "components"
 
 BarWidget {
   id: root
@@ -263,6 +264,16 @@ BarWidget {
   readonly property color colSurface: Color.popups.background
   readonly property color colBorder: Color.popups.border
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // One palette for every component below, so a component takes `palette`
+  // rather than four look-alike colour properties.
+  // Named `theme`, not `palette`: Qt 6 gives every Item a `palette` property
+  // and already has a Palette type, and a property colliding with either
+  // silently stays null instead of failing loudly.
+  Theme {
+    id: appTheme
+    bar: root.bar
+  }
 
   Component.onCompleted: {
     checkStatus()
@@ -972,7 +983,7 @@ BarWidget {
     // Qt needs an active-focus target inside the surface before any
     // Keys handler fires, and it differs per view.
     focusTarget: !root.unlocked
-      ? unlockBtn
+      ? lockedColumn.unlockButton
       : (root.currentView === "details" ? detailsViewArea : searchInput)
 
     // KeyboardPanel only focuses focusTarget when the surface maps. Unlocking,
@@ -1000,7 +1011,7 @@ BarWidget {
           if (root.unlocked) {
             searchInput.forceActiveFocus()
           } else {
-            unlockBtn.forceActiveFocus()
+            lockedColumn.unlockButton.forceActiveFocus()
           }
         })
       }
@@ -1168,93 +1179,13 @@ BarWidget {
       }
 
       // ========================================== LOCKED STATE
-      ColumnLayout {
+      LockedCard {
         id: lockedColumn
         visible: !root.unlocked
-        Layout.fillWidth: true
-        Layout.alignment: Qt.AlignHCenter
-        Layout.maximumWidth: parent ? parent.width : 0
-        spacing: Style.space(14)
-
-        // Escape has to work here too. The search field owns dismissal in the
-        // list view and does not exist while locked, so opening the panel
-        // locked used to trap the keyboard until the mouse rescued it.
-        Keys.onEscapePressed: root.close()
-        Keys.onPressed: function(event) {
-          if ((event.modifiers & Qt.ControlModifier)
-              && (event.key === Qt.Key_BracketLeft || event.key === Qt.Key_B)) {
-            root.close()
-            event.accepted = true
-          }
-        }
-
-        Item { Layout.preferredHeight: Style.space(8) }
-
-        Rectangle {
-          Layout.alignment: Qt.AlignHCenter
-          width: Style.space(56)
-          height: Style.space(56)
-          radius: Style.space(28)
-          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.12)
-          border.color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.3)
-          border.width: 1
-
-          Text {
-            anchors.centerIn: parent
-            text: ""
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(22)
-            color: root.colAccent
-          }
-        }
-
-        ColumnLayout {
-          Layout.fillWidth: true
-          spacing: Style.space(4)
-
-          Text {
-            Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
-            text: "1Password Vault Locked"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            font.bold: true
-            color: root.colForeground
-            elide: Text.ElideRight
-          }
-
-          Text {
-            Layout.fillWidth: true
-            horizontalAlignment: Text.AlignHCenter
-            text: root.account ? root.account : "Unlock with fingerprint or master password"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            color: root.colDim
-            wrapMode: Text.Wrap
-            elide: Text.ElideRight
-            maximumLineCount: 2
-          }
-        }
-
-        Item { Layout.preferredHeight: Style.space(4) }
-
-        Button {
-          id: unlockBtn
-          Layout.alignment: Qt.AlignHCenter
-          text: "Unlock Vault"
-          iconText: ""
-          accent: root.colAccent
-          selected: true
-          bordered: true
-          focusable: true
-          horizontalPadding: Style.space(16)
-          verticalPadding: Style.space(8)
-          onClicked: root.unlock()
-          Keys.onReturnPressed: root.unlock()
-          Keys.onEnterPressed: root.unlock()
-        }
-
-        Item { Layout.preferredHeight: Style.space(8) }
+        theme: appTheme
+        account: root.account
+        onUnlockRequested: root.unlock()
+        onCloseRequested: root.close()
       }
 
       // ========================================== UNLOCKED: LIST VIEW
@@ -1658,35 +1589,12 @@ BarWidget {
           }
 
           // Empty State
-          ColumnLayout {
+          EmptyState {
             anchors.centerIn: parent
             visible: root.items.length === 0
-            spacing: Style.space(6)
-
-            Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: root.searching ? "󰑐" : "󰍉"
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(32)
-              color: root.searching ? root.colAccent : root.colDim
-            }
-
-            Text {
-              Layout.alignment: Qt.AlignHCenter
-              text: root.searching ? "Loading vault..." : (root.searchQuery ? "No matching items found" : "No items in vault")
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              color: root.colForeground
-            }
-
-            Text {
-              visible: !root.searching && root.searchQuery.length > 0
-              Layout.alignment: Qt.AlignHCenter
-              text: "Try a different search query or category"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              color: root.colDim
-            }
+            theme: appTheme
+            loading: root.searching
+            query: root.searchQuery
           }
         }
 
@@ -1934,114 +1842,15 @@ BarWidget {
             // Fields Repeater (Only fields with valid content)
             Repeater {
               model: (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
-              delegate: BorderSurface {
-                id: fieldCard
-                required property var modelData
-                required property int index
-
-                // Keyboard focus and mouse hover paint the same state, and the
-                // reveal toggle follows the keyboard focus, so a revealed
-                // password re-conceals the moment focus moves off it.
-                readonly property bool focused: root.detailIndex === index
-                readonly property bool hot: focused || fieldHover.hovered
-                readonly property bool revealed: focused && root.detailRevealed
-
-                onFocusedChanged: if (focused) root.ensureDetailVisible(y, height)
-
-                // Strictly filter out any field with empty content
-                visible: !!(modelData && modelData.value && String(modelData.value).trim().length > 0)
-                Layout.fillWidth: true
-                Layout.preferredHeight: visible ? Style.space(52) : 0
-                radius: Style.cornerRadius
-                color: hot
-                  ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
-                  : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
-                borderSpec: Border.controlSpec(focused ? "focus" : (fieldHover.hovered ? "hover-cursor" : "normal"), root.colForeground, root.colAccent)
-
-                HoverHandler { id: fieldHover }
-                TapHandler { onTapped: root.detailIndex = fieldCard.index }
-
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  anchors.rightMargin: Style.space(8)
-                  spacing: Style.space(8)
-
-                  Text {
-                    text: Model.fieldIcon(modelData)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.space(16)
-                    color: root.colAccent
-                  }
-
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 1
-
-                    Text {
-                      text: Model.fieldDisplayName(modelData).toUpperCase()
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption - 1
-                      font.bold: true
-                      color: root.colDim
-                      elide: Text.ElideRight
-                    }
-
-                    Text {
-                      id: valText
-                      Layout.fillWidth: true
-                      text: (modelData.concealed && !fieldCard.revealed)
-                        ? Model.maskText(modelData.value)
-                        : Model.displayValue(modelData)
-                      font.family: (modelData.concealed && !fieldCard.revealed)
-                        ? root.fontFamily
-                        : "JetBrainsMono Nerd Font, monospace"
-                      font.pixelSize: Style.font.body
-                      color: root.colForeground
-                      elide: Text.ElideRight
-                    }
-                  }
-
-                  RowLayout {
-                    spacing: Style.space(4)
-
-                    // Eye reveal toggle
-                    Button {
-                      visible: !!modelData.concealed
-                      iconText: fieldCard.revealed ? "󰈉" : "󰈈"
-                      tooltipText: fieldCard.revealed ? "Conceal (r)" : "Reveal (r)"
-                      accent: root.colAccent
-                      horizontalPadding: Style.space(6)
-                      verticalPadding: Style.space(4)
-                      onClicked: {
-                        root.detailIndex = fieldCard.index
-                        root.detailRevealed = !root.detailRevealed
-                      }
-                    }
-
-                    // Auto-type button
-                    Button {
-                      visible: !!modelData.value
-                      iconText: "󰌌"
-                      tooltipText: "Auto-type into active window"
-                      accent: root.colAccent
-                      horizontalPadding: Style.space(6)
-                      verticalPadding: Style.space(4)
-                      onClicked: root.typeDetailField(modelData.id, Model.fieldDisplayName(modelData))
-                    }
-
-                    // Copy button
-                    Button {
-                      visible: !!modelData.value
-                      iconText: "󰆏"
-                      tooltipText: "Copy " + Model.fieldDisplayName(modelData)
-                      accent: root.colAccent
-                      horizontalPadding: Style.space(6)
-                      verticalPadding: Style.space(4)
-                      onClicked: root.copyDetailField(modelData.id, Model.fieldDisplayName(modelData))
-                    }
-                  }
-                }
+              delegate: FieldCard {
+                theme: appTheme
+                focusedIndex: root.detailIndex
+                revealed: root.detailIndex === index && root.detailRevealed
+                onFocusRequested: function(i) { root.detailIndex = i }
+                onToggleRevealRequested: root.detailRevealed = !root.detailRevealed
+                onCopyRequested: function(fieldId, label) { root.copyDetailField(fieldId, label) }
+                onTypeRequested: function(fieldId, label) { root.typeDetailField(fieldId, label) }
+                onVisibilityRequested: function(y, h) { root.ensureDetailVisible(y, h) }
               }
             }
 
@@ -2242,40 +2051,11 @@ BarWidget {
       }
     }
 
-      // Toast feedback pill. Lives at the popup's root so a copy made from the
-      // list is confirmed too; nested in the details view it was invisible for
-      // every action taken on the list.
-      BorderSurface {
-        visible: root.statusToast.length > 0
-        Layout.fillWidth: true
-        Layout.preferredHeight: Style.space(28)
-        radius: Style.cornerRadius
-        color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
-        borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
-
-        RowLayout {
-          anchors.fill: parent
-          anchors.leftMargin: Style.space(10)
-          anchors.rightMargin: Style.space(10)
-          spacing: Style.space(6)
-
-          Text {
-            text: "󰄬"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            color: root.colAccent
-          }
-
-          Text {
-            Layout.fillWidth: true
-            text: root.statusToast
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            color: root.colForeground
-            elide: Text.ElideRight
-          }
-        }
+      // Confirmation of the last action, at the popup root so a copy made from
+      // the list is confirmed too.
+      Toast {
+        theme: appTheme
+        message: root.statusToast
       }
   }
 }
