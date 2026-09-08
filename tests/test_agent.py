@@ -819,6 +819,32 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.auth_failed)
         self.assertEqual(self.service.item_details_cache, {})
 
+    def test_unlock_does_not_open_quick_access(self):
+        """Quick Access is a search window: it authorizes nothing.
+
+        The approval prompt comes from the forced status check that follows,
+        so opening Quick Access too just put a second window in the way.
+        """
+        with patch("shutil.which", return_value="/usr/bin/1password"):
+            with patch.object(self.service, "desktop_app_running", return_value=True):
+                with patch("subprocess.Popen") as mock_popen:
+                    res = self.service.unlock()
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["method"], "desktop")
+        mock_popen.assert_not_called()
+
+    def test_unlock_starts_the_app_when_it_is_not_running(self):
+        with patch("shutil.which", return_value="/usr/bin/1password"):
+            with patch.object(self.service, "desktop_app_running", return_value=False):
+                with patch("subprocess.Popen") as mock_popen:
+                    res = self.service.unlock()
+
+        self.assertTrue(res["ok"])
+        argv = mock_popen.call_args[0][0]
+        self.assertEqual(argv[0], "1password")
+        self.assertNotIn("--quick-access", argv)
+
     def test_normalize_url(self):
         self.assertEqual(fields.normalize_url("github.com"), "https://github.com")
         self.assertEqual(fields.normalize_url("http://x.test/a"), "http://x.test/a")

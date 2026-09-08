@@ -398,16 +398,50 @@ class OmaPassService:
                 "error": str(e),
             }
 
+    @staticmethod
+    def desktop_app_running() -> bool:
+        """True when the 1Password desktop app is up to answer `op`."""
+        try:
+            return subprocess.run(
+                ["pgrep", "-x", "1password"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            ).returncode == 0
+        except Exception:
+            return False
+
     def unlock(self) -> Dict[str, Any]:
-        """Triggers 1Password unlock prompt."""
+        """Puts the desktop app in a position to authorize the CLI.
+
+        Nothing here unlocks anything by itself. What authorizes `op` is an
+        `op` command running while the app is unlocked: the app then shows its
+        own approval prompt, and the caller's forced status check is what
+        triggers that. So this only makes sure the app is running.
+
+        It used to launch `1password --quick-access` as well, which is the
+        app's search window and authorizes nothing: the user got two windows
+        and only one of them was the one to answer.
+        """
         if shutil.which("1password"):
+            if self.desktop_app_running():
+                return {
+                    "ok": True,
+                    "method": "desktop",
+                    "message": "Approve the OmaPass request in 1Password.",
+                }
             try:
                 subprocess.Popen(
-                    ["1password", "--quick-access"],
+                    ["1password", "--silent"],
+                    start_new_session=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                return {"ok": True, "method": "desktop", "message": "Triggered 1Password quick access"}
+                return {
+                    "ok": True,
+                    "method": "desktop",
+                    "message": "Started 1Password. Approve the OmaPass request when it appears.",
+                }
             except Exception:
                 pass
 
