@@ -120,6 +120,32 @@ omarchy plugin enable gg.omapass
 omarchy plugin add https://github.com/itsgg/omapass.git --enable
 ```
 
+The widget appears in the bar's right section. Move it with
+`omarchy plugin enable gg.omapass <placement>`.
+
+## Removing it
+
+```bash
+omarchy plugin disable gg.omapass   # keep it installed, take it off the bar
+omarchy plugin remove gg.omapass    # remove it entirely
+```
+
+Removal takes nothing else with it. OmaPass writes only to
+`$XDG_RUNTIME_DIR/omapass-*`, which is tmpfs and gone at logout; you can clear
+it immediately with `./omapass-agent.py lock`. It never edits your 1Password
+data, your `op` configuration, or any file outside its own plugin directory.
+
+## Compatibility
+
+Developed against **Omarchy 4.0.0** and its Quickshell `omarchy-shell`. The
+popup is built on `Ui/KeyboardPanel`, so an older shell without that component
+will not load the widget. `omarchy plugin validate .` checks the manifest
+against the shell your machine is actually running.
+
+External dependencies, all invoked as separate processes and none bundled:
+`op` (1Password CLI), `wl-copy` (wl-clipboard), and optionally `wtype` for
+auto-type, `notify-send` for notifications, and `xdg-open` for websites.
+
 ## CLI Usage
 
 The helper script `omapass-agent.py` can also be called directly:

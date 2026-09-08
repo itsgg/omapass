@@ -1,0 +1,36 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Check manifest is valid JSON with the fields Omarchy requires
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          m = json.load(open("manifest.json"))
+          required = ["schemaVersion", "id", "name", "version", "author", "description", "kinds", "entryPoints"]
+          missing = [k for k in required if k not in m]
+          if missing:
+              sys.exit(f"manifest.json is missing: {', '.join(missing)}")
+          if m["schemaVersion"] != 1:
+              sys.exit("schemaVersion must be the number 1")
+          if m["id"].startswith("omarchy."):
+              sys.exit("plugin id must not use the reserved omarchy.* namespace")
+          for kind, entry in m["entryPoints"].items():
+              import os.path
+              if not os.path.isfile(entry):
+                  sys.exit(f"entry point for {kind} does not exist: {entry}")
+          print("manifest ok")
+          PY
