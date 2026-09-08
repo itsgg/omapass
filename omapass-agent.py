@@ -387,13 +387,17 @@ class OmaPassService:
                 # metadata cache and go back to claiming "unlocked".
                 self._save_cache()
 
-    def _note_op_success(self) -> None:
+    def _note_op_success(self, epoch: Optional[int] = None) -> None:
         """Records that op served a request, undoing an earlier auth failure.
 
         Retrieval succeeding is proof of authorization, so a copy that works
         after re-authenticating must not leave the widget stuck on "locked".
         """
         with self.lock:
+            # A result from a session that has since been locked proves nothing
+            # about the current one.
+            if epoch is not None and epoch != self.lock_epoch:
+                return
             if self.is_unlocked and not self.auth_failed:
                 return
             self.is_unlocked = True
@@ -585,6 +589,10 @@ class OmaPassService:
                         "lastSync": self.last_sync_time,
                     }
             else:
+                # Same revocation path as any other authorization failure:
+                # flipping the flag alone left the decrypted cache in place and
+                # did not persist auth_failed across a restart.
+                self._note_op_error(res.stderr or "not currently signed in")
                 with self.lock:
                     self.is_unlocked = False
                     self.last_status_check = now
@@ -672,22 +680,37 @@ class OmaPassService:
             self.lock_epoch += 1
             self._clear_cache()
 
+        locked_app = None
         if shutil.which("1password"):
             try:
-                subprocess.run(["1password", "--lock"], check=False, timeout=3.0)
+                locked_app = subprocess.run(
+                    ["1password", "--lock"], check=False, timeout=3.0
+                ).returncode == 0
             except Exception:
-                pass
+                locked_app = False
 
+        signed_out = None
         try:
-            subprocess.run(["op", "signout"], check=False, timeout=3.0)
+            signed_out = subprocess.run(
+                ["op", "signout"], check=False, timeout=3.0
+            ).returncode == 0
         except Exception:
-            pass
+            signed_out = False
 
         if not cleared:
             warn_clipboard_not_cleared()
             return {
                 "ok": False,
-                "error": "Vault locked and cache cleared, but the clipboard could not be cleared.",
+                "error": "Cache cleared, but the clipboard could not be cleared.",
+            }
+        # The local cache is always dropped, but saying "vault locked" when
+        # neither 1Password nor op actually locked would be a lie about where
+        # the secrets are.
+        if locked_app is False and signed_out is False:
+            return {
+                "ok": False,
+                "error": "Cache and clipboard cleared, but 1Password did not lock. "
+                         "Lock it from the app to be sure.",
             }
         return {"ok": True, "message": "Vault locked, clipboard wiped, and cache cleared."}
 
@@ -695,6 +718,9 @@ class OmaPassService:
         """Syncs item metadata from 1Password into memory cache."""
         if not self.check_op_installed():
             return {"ok": False, "error": "op CLI not installed"}
+
+        with self.lock:
+            epoch = self.lock_epoch
 
         try:
             res = subprocess.run(
@@ -744,6 +770,8 @@ class OmaPassService:
                 })
 
             with self.lock:
+                if epoch != self.lock_epoch:
+                    return {"ok": False, "error": "Vault was locked during this sync"}
                 self.items = parsed
                 self.last_sync_time = time.time()
                 self.is_unlocked = True
@@ -878,7 +906,12 @@ class OmaPassService:
         ftype = str(f.get("type", "")).upper()
 
         if rule is None:
-            return 3 if fid == field or label == field else 0
+            # An exact id beats a label that merely reads like one: an item can
+            # carry a field labelled "recovery_code" alongside the real field
+            # whose id is recovery_code, and the wrong one was winning on order.
+            if fid == field:
+                return 4
+            return 2 if label == field else 0
 
         # Every signal is scored and the best wins. Returning on the first
         # hit let a weak signal shadow a stronger one: two MONTH_YEAR fields
@@ -896,6 +929,18 @@ class OmaPassService:
             # validFrom as well as expiry.
             score = max(score, 1)
         return score
+
+    @classmethod
+    def _match_field_entry(cls, item_data: Dict[str, Any], field: str) -> Optional[Dict[str, Any]]:
+        """Returns the best-scoring field dict for `field`, or None."""
+        best_score = 0
+        best: Optional[Dict[str, Any]] = None
+        for f in item_data.get("fields", []):
+            score = cls._field_score(f, field)
+            if score > best_score and str(f.get("value", "")):
+                best_score = score
+                best = f
+        return best
 
     @classmethod
     def _match_field(cls, item_data: Dict[str, Any], field: str) -> Optional[str]:
@@ -947,6 +992,8 @@ class OmaPassService:
         # A TOTP code is only valid for its 30s window, so it is never served
         # from cache: always ask op for a fresh one.
         if field == "otp":
+            with self.lock:
+                epoch = self.lock_epoch
             try:
                 res = subprocess.run(
                     ["op", "item", "get", item_id, "--otp"],
@@ -963,7 +1010,7 @@ class OmaPassService:
             if res.returncode == 0:
                 code = res.stdout.removesuffix("\r\n").removesuffix("\n")
                 if code:
-                    self._note_op_success()
+                    self._note_op_success(epoch)
                     return True, code
                 return False, "This item has no one-time password"
             self._note_op_error(res.stderr)
@@ -971,18 +1018,34 @@ class OmaPassService:
 
         cached = self._cached_details(item_id)
         if cached:
-            value = self._match_field(cached, field)
-            if value:
-                return True, value
+            entry = self._match_field_entry(cached, field)
+            if entry is not None:
+                return self._value_or_live_code(item_id, entry)
 
         details = self.get_item(item_id)
         if not details.get("ok"):
             return False, str(details.get("error") or f"Failed to retrieve {field}")
 
-        value = self._match_field(details["item"], field)
-        if value:
-            return True, value
+        entry = self._match_field_entry(details["item"], field)
+        if entry is not None:
+            return self._value_or_live_code(item_id, entry)
+        if field == "notes":
+            notes = str(details["item"].get("notes") or "")
+            if notes:
+                return True, notes
         return False, f"No {field} field on this item"
+
+    def _value_or_live_code(self, item_id: str, entry: Dict[str, Any]) -> Tuple[bool, str]:
+        """Returns a field's value, except for an OTP field.
+
+        An OTP field's stored value is the otpauth:// URI, which carries the
+        permanent shared secret. Handing that to the clipboard or to autotype
+        would paste a reusable second factor into a login form, so the request
+        is answered with a live code instead.
+        """
+        if str(entry.get("type", "")).upper() == "OTP":
+            return self.fetch_field(item_id, "otp")
+        return True, str(entry.get("value", ""))
 
     def copy_to_clipboard(
         self,
@@ -1024,6 +1087,12 @@ class OmaPassService:
             with open_private(clp) as clf:
                 fcntl.flock(clf, fcntl.LOCK_EX)
                 try:
+                    # Re-checked under the lock, not just before it: a lock
+                    # landing between the first check and this write would
+                    # otherwise still put the credential on the clipboard.
+                    with self.lock:
+                        if epoch != self.lock_epoch:
+                            return {"ok": False, "error": "Vault was locked during this request"}
                     try:
                         proc = subprocess.Popen(
                             ["wl-copy"],
@@ -1043,8 +1112,14 @@ class OmaPassService:
                             proc.communicate(timeout=1.0)
                         except Exception:
                             pass
-                        clear_clipboard_once()
-                        return {"ok": False, "error": "wl-copy timed out; clipboard cleared"}
+                        if clear_clipboard_once():
+                            return {"ok": False, "error": "wl-copy timed out; clipboard cleared"}
+                        warn_clipboard_not_cleared()
+                        return {
+                            "ok": False,
+                            "error": "wl-copy timed out and the clipboard could not be cleared. "
+                                     "The credential may still be on it.",
+                        }
                     except Exception as e:
                         return {"ok": False, "error": f"Failed to run wl-copy: {e}"}
 
@@ -1164,6 +1239,9 @@ class OmaPassService:
         if not shutil.which("wtype"):
             return {"ok": False, "error": "wtype is not installed."}
 
+        with self.lock:
+            epoch = self.lock_epoch
+
         if not value:
             if not item_id or not field:
                 return {"ok": False, "error": "No value or item_id provided"}
@@ -1172,8 +1250,17 @@ class OmaPassService:
                 return {"ok": False, "error": fetched}
             value = fetched
 
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return {"ok": False, "error": "Vault was locked during this request"}
+
         def _do_type():
             time.sleep(0.35)
+            # Checked again on the far side of the focus delay: locking during
+            # that window must stop the keystrokes, not merely precede them.
+            with self.lock:
+                if epoch != self.lock_epoch:
+                    return
             try:
                 # `wtype -` reads the text from stdin. Passing it as an
                 # argument would publish the credential in the process list
@@ -1350,7 +1437,7 @@ class OmaPassService:
                     "timestamp": time.time(),
                     "data": cached_copy,
                 }
-            self._note_op_success()
+            self._note_op_success(epoch)
 
             return {"ok": True, "item": item_data}
         except subprocess.TimeoutExpired:

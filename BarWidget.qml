@@ -448,6 +448,10 @@ BarWidget {
     // The item this fetch was issued for, so a response that lands after the
     // user closed or navigated away cannot be adopted.
     property string requestedId: ""
+    // When the request was issued. If the reply crosses a window boundary the
+    // code belongs to the window that just ended, and giving it a fresh
+    // countdown would show an expired code as good for a full period.
+    property double requestedAt: 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -603,6 +607,14 @@ BarWidget {
           var resp = JSON.parse(text)
           var stillCurrent = root.itemDetails && root.itemDetails.id === otpProc.requestedId
           if (resp.ok && resp.otp && stillCurrent) {
+            var now = Date.now()
+            var period = root.totpPeriod
+            if (Math.floor(otpProc.requestedAt / period) !== Math.floor(now / period)) {
+              // Straddled a boundary: this code is already dead. Ask again
+              // rather than display it.
+              root.scheduleTotpRetry(true)
+              return
+            }
             root.freshTotp = String(resp.otp)
             root.markTotpFetched()
             ok = true
@@ -626,8 +638,13 @@ BarWidget {
   }
 
   // Try again on the next window boundary rather than giving up for good.
-  function scheduleTotpRetry() {
+  function scheduleTotpRetry(immediate) {
     if (!root.itemHasTotp) return
+    if (immediate) {
+      totpTimer.interval = 250
+      totpTimer.restart()
+      return
+    }
     var now = Date.now()
     totpTimer.interval = Math.max(2000, root.totpPeriod - (now % root.totpPeriod) + 500)
     totpTimer.restart()
@@ -638,6 +655,7 @@ BarWidget {
     if (!root.itemDetails || !root.itemDetails.id) return
     if (!root.itemHasTotp) return
     otpProc.requestedId = String(root.itemDetails.id)
+    otpProc.requestedAt = Date.now()
     root.runHelper(otpProc, { action: "otp", id: otpProc.requestedId })
   }
 

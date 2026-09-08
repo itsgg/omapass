@@ -664,6 +664,96 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_otp_action_requires_id(self):
         self.assertFalse(self.service.dispatch({"action": "otp"})["ok"])
 
+    @patch("subprocess.run")
+    def test_copying_an_otp_field_returns_a_live_code_not_the_seed(self, mock_run):
+        """The details row's value is the otpauth:// URI: the permanent secret."""
+        seed = "otpauth://totp/Acme?secret=JBSWY3DPEHPK3PXP&issuer=Acme"
+        self.service.item_details_cache["x"] = {"timestamp": time.time(), "data": {
+            "id": "x", "notes": "", "fields": [
+                {"id": "totp", "label": "one-time password", "type": "OTP", "value": seed},
+            ]}}
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="777888\n")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            ok, val = self.service.fetch_field("x", "totp")
+
+        self.assertTrue(ok)
+        self.assertEqual(val, "777888")
+        self.assertNotIn("secret=", val)
+        self.assertIn("--otp", mock_run.call_args[0][0])
+
+    def test_exact_field_id_beats_a_lookalike_label(self):
+        item = {"fields": [
+            {"id": "note_1", "type": "STRING", "label": "recovery_code", "value": "decoy"},
+            {"id": "recovery_code", "type": "CONCEALED", "label": "Recovery", "value": "real"},
+        ]}
+        self.assertEqual(self.service._match_field(item, "recovery_code"), "real")
+
+    def test_copy_refuses_once_the_vault_locked_mid_request(self):
+        self.service.lock_epoch = 5
+        original = self.service.fetch_field
+
+        def lock_during_fetch(item_id, field):
+            self.service.lock_epoch += 1  # a lock lands while op is running
+            return True, "secret"
+
+        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+            with patch.object(self.service, "fetch_field", side_effect=lock_during_fetch):
+                with patch("subprocess.Popen") as mock_popen:
+                    res = self.service.copy_to_clipboard("i1", "password")
+
+        self.assertFalse(res["ok"])
+        self.assertIn("locked", res["error"])
+        mock_popen.assert_not_called()
+
+    def test_autotype_refuses_once_the_vault_locked_mid_request(self):
+        self.service.lock_epoch = 2
+
+        def lock_during_fetch(item_id, field):
+            self.service.lock_epoch += 1
+            return True, "secret"
+
+        with patch("shutil.which", return_value="/usr/bin/wtype"):
+            with patch.object(self.service, "fetch_field", side_effect=lock_during_fetch):
+                with patch("subprocess.Popen") as mock_popen:
+                    res = self.service.type_credentials("i1", "password")
+
+        self.assertFalse(res["ok"])
+        mock_popen.assert_not_called()
+
+    def test_a_result_from_a_locked_session_cannot_restore_unlocked(self):
+        self.service.is_unlocked = False
+        self.service.auth_failed = True
+        stale_epoch = self.service.lock_epoch
+        self.service.lock_epoch += 1          # vault locked since that request
+        self.service._note_op_success(stale_epoch)
+        self.assertFalse(self.service.is_unlocked)
+        # A result from the current session still counts.
+        self.service._note_op_success(self.service.lock_epoch)
+        self.assertTrue(self.service.is_unlocked)
+
+    def test_lock_reports_failure_when_nothing_actually_locked(self):
+        with patch.object(agent, "wipe_clipboard_now", return_value=True):
+            with patch("shutil.which", return_value="/usr/bin/1password"):
+                with patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                    res = self.service.lock_vault()
+        self.assertFalse(res["ok"])
+        self.assertIn("did not lock", res["error"])
+
+    @patch("subprocess.run")
+    def test_forced_status_failure_revokes_the_cached_secrets(self, mock_run):
+        self._seed_details_cache()
+        self.service.is_unlocked = True
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="[ERROR] you are not currently signed in")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=True)
+
+        self.assertFalse(status["unlocked"])
+        self.assertTrue(self.service.auth_failed)
+        self.assertEqual(self.service.item_details_cache, {})
+
     def test_normalize_url(self):
         self.assertEqual(self.service.normalize_url("github.com"), "https://github.com")
         self.assertEqual(self.service.normalize_url("http://x.test/a"), "http://x.test/a")
