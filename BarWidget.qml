@@ -13,8 +13,11 @@ BarWidget {
 
   // Open / Close lifecycle
   property bool popupOpen: false
-  function close() { popupOpen = false }
+  function close() {
+    popupOpen = false
+  }
   function open() {
+    root.currentView = "list"
     popupOpen = true
     checkStatus()
     refreshItems()
@@ -33,6 +36,14 @@ BarWidget {
   property int itemCount: 0
   property bool busy: false
   property string lastRunAction: ""
+
+  // View state: "list" or "details"
+  property string currentView: "list"
+  property var selectedItem: null
+  property var itemDetails: null
+  property bool loadingDetails: false
+  property string detailsError: ""
+  property string statusToast: ""
 
   // Search & Navigation
   property string searchQuery: ""
@@ -53,6 +64,19 @@ BarWidget {
   Component.onCompleted: {
     checkStatus()
     refreshItems()
+  }
+
+  // Toast feedback timer
+  Timer {
+    id: toastTimer
+    interval: 3200
+    repeat: false
+    onTriggered: root.statusToast = ""
+  }
+
+  function showToast(msg) {
+    root.statusToast = msg
+    toastTimer.restart()
   }
 
   // Status check process
@@ -118,10 +142,70 @@ BarWidget {
         action: "list",
         query: root.searchQuery,
         category: root.selectedCategory,
-        limit: 60
+        limit: 80
       })
     ]
     searchProc.running = true
+  }
+
+  // Item details process
+  Process {
+    id: itemDetailsProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.loadingDetails = false
+        try {
+          var resp = JSON.parse(text)
+          if (resp.ok && resp.item) {
+            root.itemDetails = resp.item
+            root.detailsError = ""
+          } else {
+            root.detailsError = resp.error || "Failed to retrieve item details"
+          }
+        } catch (e) {
+          root.detailsError = "Error loading item details"
+        }
+      }
+    }
+  }
+
+  function showItemDetails(item) {
+    if (!item) return
+    root.selectedItem = item
+    root.itemDetails = null
+    root.detailsError = ""
+    root.loadingDetails = true
+    root.currentView = "details"
+
+    itemDetailsProc.command = [
+      "python3",
+      root.helperPath,
+      "request",
+      JSON.stringify({
+        action: "get_item",
+        id: item.id
+      })
+    ]
+    itemDetailsProc.running = true
+  }
+
+  function backToList() {
+    root.currentView = "list"
+    root.selectedItem = null
+    root.itemDetails = null
+    root.detailsError = ""
+    Qt.callLater(function() {
+      if (root.unlocked) {
+        searchInput.forceActiveFocus()
+      }
+    })
+  }
+
+  function openDesktop(itemId) {
+    if (!itemId) return
+    runAction({ action: "open_desktop", id: itemId })
   }
 
   // Generic action runner
@@ -164,6 +248,7 @@ BarWidget {
     runAction({ action: "lock" })
     root.unlocked = false
     root.items = []
+    root.currentView = "list"
   }
 
   function syncVault() {
@@ -177,6 +262,28 @@ BarWidget {
       field: field || root.defaultAction,
       title: title || "",
       timeout: root.clipboardTimeout
+    })
+    showToast("Copied " + (field || "password") + " (clears in " + root.clipboardTimeout + "s)")
+  }
+
+  function copyRawValue(val, label, title) {
+    if (!val) return
+    runAction({
+      action: "copy",
+      value: val,
+      title: title || "",
+      field: label || "",
+      timeout: root.clipboardTimeout
+    })
+    showToast("Copied " + label + " (clears in " + root.clipboardTimeout + "s)")
+  }
+
+  function typeFieldValue(val, label) {
+    if (!val) return
+    runAction({
+      action: "type",
+      value: val,
+      field: label || ""
     })
     root.close()
   }
@@ -204,7 +311,7 @@ BarWidget {
     onTriggered: root.refreshItems()
   }
 
-  // Periodic status poll (fast when open, gentle when closed)
+  // Periodic status poll
   Timer {
     id: checkTimer
     interval: root.popupOpen ? 2500 : 15000
@@ -247,13 +354,14 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    contentWidth: popup.fittedContentWidth(Style.space(460))
+    contentWidth: popup.fittedContentWidth(Style.space(480))
     contentHeight: root.unlocked
-      ? popup.cappedContentHeight(Style.space(520))
+      ? popup.cappedContentHeight(Style.space(540))
       : popup.fittedContentHeight(lockedColumn.implicitHeight + Style.space(48))
 
     onOpenChanged: {
       if (open) {
+        root.currentView = "list"
         root.checkStatus()
         root.refreshItems()
         Qt.callLater(function() {
@@ -270,8 +378,9 @@ BarWidget {
       anchors.fill: parent
       spacing: Style.space(10)
 
-      // ========================================== HEADER
+      // ========================================== LIST HEADER
       RowLayout {
+        visible: root.currentView === "list"
         Layout.fillWidth: true
         spacing: Style.space(8)
 
@@ -326,6 +435,103 @@ BarWidget {
         }
       }
 
+      // ========================================== DETAILS HEADER
+      RowLayout {
+        visible: root.currentView === "details"
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Button {
+          iconText: "󰁍"
+          text: "Back"
+          accent: root.colAccent
+          horizontalPadding: Style.space(8)
+          verticalPadding: Style.space(4)
+          onClicked: root.backToList()
+        }
+
+        Rectangle {
+          width: Style.space(28)
+          height: Style.space(28)
+          radius: Style.space(6)
+          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.2)
+
+          Text {
+            anchors.centerIn: parent
+            text: root.selectedItem ? Model.categoryIcon(root.selectedItem.category) : "󰌆"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(14)
+            color: root.colAccent
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: 1
+
+          Text {
+            Layout.fillWidth: true
+            text: (root.itemDetails && root.itemDetails.title) ? root.itemDetails.title : (root.selectedItem ? root.selectedItem.title : "Item Details")
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            color: root.colForeground
+            elide: Text.ElideRight
+          }
+
+          RowLayout {
+            spacing: Style.space(6)
+
+            Rectangle {
+              visible: !!(root.itemDetails && root.itemDetails.vault) || !!(root.selectedItem && root.selectedItem.vault)
+              color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
+              radius: Style.space(4)
+              Layout.preferredHeight: Style.space(16)
+              Layout.preferredWidth: vaultText.implicitWidth + Style.space(10)
+
+              Text {
+                id: vaultText
+                anchors.centerIn: parent
+                text: (root.itemDetails && root.itemDetails.vault) || (root.selectedItem && root.selectedItem.vault) || ""
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption - 1
+                color: root.colDim
+              }
+            }
+
+            Rectangle {
+              visible: !!(root.itemDetails && root.itemDetails.category) || !!(root.selectedItem && root.selectedItem.category)
+              color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.15)
+              radius: Style.space(4)
+              Layout.preferredHeight: Style.space(16)
+              Layout.preferredWidth: catBadgeText.implicitWidth + Style.space(10)
+
+              Text {
+                id: catBadgeText
+                anchors.centerIn: parent
+                text: (root.itemDetails && root.itemDetails.category) || (root.selectedItem && root.selectedItem.category) || ""
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption - 1
+                font.bold: true
+                color: root.colAccent
+              }
+            }
+          }
+        }
+
+        Button {
+          iconText: "󱔐"
+          tooltipText: "Open in 1Password desktop app"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: {
+            var id = (root.itemDetails && root.itemDetails.id) || (root.selectedItem && root.selectedItem.id)
+            if (id) root.openDesktop(id)
+          }
+        }
+      }
+
       // ========================================== LOCKED STATE
       ColumnLayout {
         id: lockedColumn
@@ -335,7 +541,6 @@ BarWidget {
 
         Item { Layout.preferredHeight: Style.space(8) }
 
-        // Centered lock icon badge
         Rectangle {
           Layout.alignment: Qt.AlignHCenter
           width: Style.space(56)
@@ -354,7 +559,6 @@ BarWidget {
           }
         }
 
-        // Title and description
         ColumnLayout {
           Layout.fillWidth: true
           spacing: Style.space(4)
@@ -379,7 +583,6 @@ BarWidget {
 
         Item { Layout.preferredHeight: Style.space(4) }
 
-        // Unlock Action Button
         Button {
           id: unlockBtn
           Layout.alignment: Qt.AlignHCenter
@@ -399,14 +602,14 @@ BarWidget {
         Item { Layout.preferredHeight: Style.space(8) }
       }
 
-      // ========================================== UNLOCKED STATE
+      // ========================================== UNLOCKED: LIST VIEW
       ColumnLayout {
-        visible: root.unlocked
+        visible: root.unlocked && root.currentView === "list"
         Layout.fillWidth: true
         Layout.fillHeight: true
         spacing: Style.space(8)
 
-        // ------------------ SEARCH FIELD
+        // Search Bar
         BorderSurface {
           id: searchBox
           Layout.fillWidth: true
@@ -467,6 +670,11 @@ BarWidget {
                   itemList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
                 }
               }
+              Keys.onRightPressed: {
+                if (root.items.length > 0 && root.selectedIndex >= 0 && root.selectedIndex < root.items.length) {
+                  root.showItemDetails(root.items[root.selectedIndex])
+                }
+              }
               Keys.onReturnPressed: function(event) {
                 if (root.items.length === 0) return
                 var item = root.items[root.selectedIndex]
@@ -479,7 +687,7 @@ BarWidget {
                 } else if (event.modifiers & Qt.AltModifier) {
                   root.openUrl(item.url)
                 } else {
-                  root.copyField(item.id, root.defaultAction, item.title)
+                  root.showItemDetails(item)
                 }
               }
             }
@@ -505,7 +713,7 @@ BarWidget {
           }
         }
 
-        // ------------------ CATEGORY FILTER CHIPS
+        // Category Filter Chips
         RowLayout {
           Layout.fillWidth: true
           spacing: Style.space(6)
@@ -568,7 +776,7 @@ BarWidget {
           }
         }
 
-        // ------------------ ITEMS LIST
+        // Items List
         Item {
           Layout.fillWidth: true
           Layout.fillHeight: true
@@ -587,7 +795,7 @@ BarWidget {
 
               readonly property bool isSelected: root.selectedIndex === index
               width: itemList.width
-              height: Style.space(46)
+              height: Style.space(48)
               radius: Style.cornerRadius
               color: isSelected
                 ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
@@ -601,7 +809,7 @@ BarWidget {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onEntered: root.selectedIndex = index
-                onClicked: root.copyField(modelData.id, root.defaultAction, modelData.title)
+                onClicked: root.showItemDetails(modelData)
               }
 
               RowLayout {
@@ -610,10 +818,10 @@ BarWidget {
                 anchors.rightMargin: Style.space(6)
                 spacing: Style.space(8)
 
-                // Category icon container
+                // Category Icon
                 Rectangle {
-                  width: Style.space(28)
-                  height: Style.space(28)
+                  width: Style.space(30)
+                  height: Style.space(30)
                   radius: Style.space(6)
                   color: isSelected
                     ? Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.25)
@@ -628,7 +836,7 @@ BarWidget {
                   }
                 }
 
-                // Title and subtitle
+                // Title and Subtitle
                 ColumnLayout {
                   Layout.fillWidth: true
                   spacing: Style.space(1)
@@ -756,12 +964,36 @@ BarWidget {
                       onClicked: root.openUrl(modelData.url)
                     }
                   }
+
+                  // View Details (Chevron)
+                  Rectangle {
+                    width: Style.space(26)
+                    height: Style.space(26)
+                    radius: Style.space(4)
+                    color: detBtnMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰅂"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: detBtnMouse.containsMouse ? Color.background : root.colForeground
+                    }
+
+                    MouseArea {
+                      id: detBtnMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.showItemDetails(modelData)
+                    }
+                  }
                 }
               }
             }
           }
 
-          // ------------------ EMPTY STATE
+          // Empty State
           ColumnLayout {
             anchors.centerIn: parent
             visible: root.items.length === 0
@@ -794,20 +1026,21 @@ BarWidget {
           }
         }
 
-        // ------------------ FOOTER
+        // Footer Separator
         Rectangle {
           Layout.fillWidth: true
           Layout.preferredHeight: 1
           color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
         }
 
+        // List View Footer
         RowLayout {
           Layout.fillWidth: true
           spacing: Style.space(4)
 
           Text {
             Layout.fillWidth: true
-            text: "↵ Password   ⇧↵ Username   ⌃↵ TOTP   ⌥↵ Open"
+            text: "Click Details   ↵ Details   󰌆 Quick Copy   ⇧↵ Username   ⌃↵ TOTP"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
@@ -821,6 +1054,460 @@ BarWidget {
             color: root.colDim
             elide: Text.ElideMiddle
             Layout.maximumWidth: Style.space(160)
+          }
+        }
+      }
+
+      // ========================================== UNLOCKED: DETAILS VIEW
+      ColumnLayout {
+        id: detailsViewArea
+        visible: root.unlocked && root.currentView === "details"
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        spacing: Style.space(8)
+
+        // Loading Indicator
+        ColumnLayout {
+          visible: root.loadingDetails
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: Style.space(12)
+
+          Item { Layout.fillHeight: true }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "󰑐"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(34)
+            color: root.colAccent
+
+            RotationAnimator on rotation {
+              from: 0
+              to: 360
+              duration: 900
+              loops: Animation.Infinite
+              running: root.loadingDetails
+            }
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "Loading item details..."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.colDim
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+
+        // Error State
+        ColumnLayout {
+          visible: !root.loadingDetails && !!root.detailsError
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: Style.space(10)
+
+          Item { Layout.fillHeight: true }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "󰅙"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(34)
+            color: Color.negative || "#e06c75"
+          }
+
+          Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: root.detailsError
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.colForeground
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            Layout.maximumWidth: Style.space(380)
+          }
+
+          Button {
+            Layout.alignment: Qt.AlignHCenter
+            text: "Retry"
+            iconText: "󰑐"
+            accent: root.colAccent
+            onClicked: {
+              if (root.selectedItem) root.showItemDetails(root.selectedItem)
+            }
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+
+        // Scrollable Details Body
+        Flickable {
+          id: detailsFlick
+          visible: !root.loadingDetails && !root.detailsError && !!root.itemDetails
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          contentWidth: width
+          contentHeight: detailsContentCol.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+
+          ColumnLayout {
+            id: detailsContentCol
+            width: parent.width
+            spacing: Style.space(8)
+
+            // TOTP Highlight Banner
+            BorderSurface {
+              visible: !!(root.itemDetails && root.itemDetails.totp)
+              Layout.fillWidth: true
+              Layout.preferredHeight: Style.space(56)
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.12)
+              borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(12)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  text: "󰄬"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(20)
+                  color: root.colAccent
+                }
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 1
+
+                  Text {
+                    text: "ONE-TIME PASSWORD (TOTP)"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption - 1
+                    font.bold: true
+                    color: root.colAccent
+                  }
+
+                  Text {
+                    text: (root.itemDetails && root.itemDetails.totp) ? root.itemDetails.totp : ""
+                    font.family: "JetBrainsMono Nerd Font, monospace"
+                    font.pixelSize: Style.font.heading
+                    font.bold: true
+                    color: root.colForeground
+                  }
+                }
+
+                Button {
+                  iconText: "󰆏"
+                  text: "Copy"
+                  accent: root.colAccent
+                  horizontalPadding: Style.space(10)
+                  verticalPadding: Style.space(4)
+                  onClicked: {
+                    if (root.itemDetails && root.itemDetails.totp) {
+                      root.copyRawValue(root.itemDetails.totp, "TOTP", root.itemDetails.title)
+                    }
+                  }
+                }
+              }
+            }
+
+            // Fields Header
+            PanelSectionHeader {
+              visible: !!(root.itemDetails && root.itemDetails.fields && root.itemDetails.fields.length > 0)
+              text: "CREDENTIALS & FIELDS"
+              foreground: root.colForeground
+              fontFamily: root.fontFamily
+            }
+
+            // Fields Repeater
+            Repeater {
+              model: (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
+              delegate: BorderSurface {
+                id: fieldCard
+                required property var modelData
+                required property int index
+                property bool revealed: false
+
+                Layout.fillWidth: true
+                Layout.preferredHeight: Style.space(52)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+                borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: Model.fieldIcon(modelData)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(16)
+                    color: root.colAccent
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+
+                    Text {
+                      text: Model.fieldDisplayName(modelData).toUpperCase()
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 1
+                      font.bold: true
+                      color: root.colDim
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      id: valText
+                      Layout.fillWidth: true
+                      text: (modelData.concealed && !fieldCard.revealed)
+                        ? Model.maskText(modelData.value)
+                        : (modelData.value || "—")
+                      font.family: (modelData.concealed && !fieldCard.revealed)
+                        ? root.fontFamily
+                        : "JetBrainsMono Nerd Font, monospace"
+                      font.pixelSize: Style.font.body
+                      color: modelData.value ? root.colForeground : root.colDim
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  RowLayout {
+                    spacing: Style.space(4)
+
+                    // Eye reveal toggle
+                    Button {
+                      visible: !!modelData.concealed
+                      iconText: fieldCard.revealed ? "󰈉" : "󰈈"
+                      tooltipText: fieldCard.revealed ? "Conceal" : "Reveal"
+                      accent: root.colAccent
+                      horizontalPadding: Style.space(6)
+                      verticalPadding: Style.space(4)
+                      onClicked: fieldCard.revealed = !fieldCard.revealed
+                    }
+
+                    // Auto-type button
+                    Button {
+                      visible: !!modelData.value
+                      iconText: "󰌌"
+                      tooltipText: "Auto-type into active window"
+                      accent: root.colAccent
+                      horizontalPadding: Style.space(6)
+                      verticalPadding: Style.space(4)
+                      onClicked: root.typeFieldValue(modelData.value, Model.fieldDisplayName(modelData))
+                    }
+
+                    // Copy button
+                    Button {
+                      visible: !!modelData.value
+                      iconText: "󰆏"
+                      tooltipText: "Copy " + Model.fieldDisplayName(modelData)
+                      accent: root.colAccent
+                      horizontalPadding: Style.space(6)
+                      verticalPadding: Style.space(4)
+                      onClicked: root.copyRawValue(modelData.value, Model.fieldDisplayName(modelData), root.itemDetails.title)
+                    }
+                  }
+                }
+              }
+            }
+
+            // Websites Header
+            PanelSectionHeader {
+              visible: !!(root.itemDetails && root.itemDetails.urls && root.itemDetails.urls.length > 0)
+              text: "WEBSITES"
+              foreground: root.colForeground
+              fontFamily: root.fontFamily
+            }
+
+            // Websites Repeater
+            Repeater {
+              model: (root.itemDetails && root.itemDetails.urls) ? root.itemDetails.urls : []
+              delegate: BorderSurface {
+                required property var modelData
+                required property int index
+                Layout.fillWidth: true
+                Layout.preferredHeight: Style.space(42)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+                borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(8)
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: "󰖟"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(15)
+                    color: root.colAccent
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: modelData.href || ""
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    color: root.colForeground
+                    elide: Text.ElideRight
+                  }
+
+                  Button {
+                    iconText: "󰆏"
+                    tooltipText: "Copy URL"
+                    accent: root.colAccent
+                    horizontalPadding: Style.space(6)
+                    verticalPadding: Style.space(4)
+                    onClicked: root.copyRawValue(modelData.href, "URL", root.itemDetails.title)
+                  }
+
+                  Button {
+                    iconText: "󰌹"
+                    tooltipText: "Open in Browser"
+                    accent: root.colAccent
+                    horizontalPadding: Style.space(6)
+                    verticalPadding: Style.space(4)
+                    onClicked: root.openUrl(modelData.href)
+                  }
+                }
+              }
+            }
+
+            // Notes Header
+            PanelSectionHeader {
+              visible: !!(root.itemDetails && root.itemDetails.notes)
+              text: "SECURE NOTES"
+              foreground: root.colForeground
+              fontFamily: root.fontFamily
+            }
+
+            // Notes Card
+            BorderSurface {
+              visible: !!(root.itemDetails && root.itemDetails.notes)
+              Layout.fillWidth: true
+              Layout.preferredHeight: Math.min(Style.space(130), Math.max(Style.space(64), notesText.implicitHeight + Style.space(24)))
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+              borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+              ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: Style.space(8)
+                spacing: Style.space(4)
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  Item { Layout.fillWidth: true }
+                  Button {
+                    iconText: "󰆏"
+                    text: "Copy Notes"
+                    accent: root.colAccent
+                    horizontalPadding: Style.space(6)
+                    verticalPadding: Style.space(2)
+                    onClicked: root.copyRawValue(root.itemDetails.notes, "Notes", root.itemDetails.title)
+                  }
+                }
+
+                Flickable {
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  contentHeight: notesText.implicitHeight
+                  contentWidth: width
+                  clip: true
+
+                  TextEdit {
+                    id: notesText
+                    width: parent.width
+                    text: root.itemDetails ? root.itemDetails.notes : ""
+                    font.family: "JetBrainsMono Nerd Font, monospace"
+                    font.pixelSize: Style.font.caption
+                    color: root.colForeground
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.Wrap
+                  }
+                }
+              }
+            }
+
+            Item { Layout.preferredHeight: Style.space(4) }
+          }
+        }
+
+        // Toast feedback pill
+        BorderSurface {
+          visible: root.statusToast.length > 0
+          Layout.fillWidth: true
+          Layout.preferredHeight: Style.space(28)
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
+          borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+          RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(10)
+            anchors.rightMargin: Style.space(10)
+            spacing: Style.space(6)
+
+            Text {
+              text: "󰄬"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              color: root.colAccent
+            }
+
+            Text {
+              Layout.fillWidth: true
+              text: root.statusToast
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.colForeground
+              elide: Text.ElideRight
+            }
+          }
+        }
+
+        // Footer Separator
+        Rectangle {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 1
+          color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.1)
+        }
+
+        // Details View Footer
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(4)
+
+          Button {
+            iconText: "󰁍"
+            text: "Back to List"
+            accent: root.colAccent
+            horizontalPadding: Style.space(8)
+            verticalPadding: Style.space(2)
+            onClicked: root.backToList()
+          }
+
+          Item { Layout.fillWidth: true }
+
+          Text {
+            visible: !!(root.itemDetails && root.itemDetails.updatedAt)
+            text: (root.itemDetails && root.itemDetails.updatedAt) ? ("Updated " + root.itemDetails.updatedAt.substring(0, 10)) : ""
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.colDim
           }
         }
       }

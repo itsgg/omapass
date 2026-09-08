@@ -136,7 +136,66 @@ class TestOmaPassService(unittest.TestCase):
             self.assertTrue(cached_status["unlocked"])
             mock_run.assert_not_called()
 
+    @patch("subprocess.run")
+    def test_get_item_parsing_and_caching(self, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = '''{
+            "id": "item123",
+            "title": "Amazon",
+            "category": "LOGIN",
+            "vault": {"name": "Personal"},
+            "favorite": true,
+            "urls": [{"label": "website", "href": "https://amazon.com", "primary": true}],
+            "fields": [
+                {"id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "user@example.com"},
+                {"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "supersecret"},
+                {"id": "totp", "type": "OTP", "purpose": "", "label": "one-time password", "value": "otpauth://...", "totp": "123456"},
+                {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notes", "value": "my secret note"}
+            ]
+        }'''
+        mock_run.return_value = mock_proc
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("item123")
+            self.assertTrue(res["ok"])
+            item = res["item"]
+            self.assertEqual(item["title"], "Amazon")
+            self.assertEqual(item["vault"], "Personal")
+            self.assertEqual(item["totp"], "123456")
+            self.assertEqual(item["notes"], "my secret note")
+            self.assertEqual(len(item["fields"]), 3)
+            self.assertTrue(item["fields"][1]["concealed"])
+
+            # Test in-memory cache hit
+            mock_run.reset_mock()
+            cached_res = self.service.get_item("item123")
+            self.assertTrue(cached_res["ok"])
+            self.assertEqual(cached_res["item"]["title"], "Amazon")
+            mock_run.assert_not_called()
+
+    @patch("subprocess.Popen")
+    def test_open_desktop(self, mock_popen):
+        res = self.service.open_desktop("item123")
+        self.assertTrue(res["ok"])
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        self.assertIn("onepassword://item?i=item123", args)
+
+    @patch("subprocess.Popen")
+    def test_copy_direct_value(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (b"", b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+            res = self.service.copy_to_clipboard(value="my-password-value", field="Password", title="Amazon")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["field"], "Password")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -128,6 +128,7 @@ class OmaPassService:
         self.lock = threading.RLock()
         self.clipboard_lock = threading.Lock()
         self.items: List[Dict[str, Any]] = []
+        self.item_details_cache: Dict[str, Any] = {}
         self.last_sync_time: float = 0
         self.is_unlocked: bool = False
         self.account_info: Dict[str, Any] = {}
@@ -171,6 +172,7 @@ class OmaPassService:
         """Clears memory and disk cache."""
         with self.lock:
             self.items = []
+            self.item_details_cache.clear()
             self.last_sync_time = 0
             self.is_unlocked = False
             self.account_info = {}
@@ -535,15 +537,23 @@ class OmaPassService:
 
     def copy_to_clipboard(
         self,
-        item_id: str,
-        field: str,
+        item_id: str = "",
+        field: str = "",
         title: str = "",
+        value: str = "",
         timeout_seconds: int = DEFAULT_CLIPBOARD_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Fetches field, writes to wl-copy, and serializes token/timer publication under flock."""
-        ok, value = self.fetch_field(item_id, field)
-        if not ok:
-            return {"ok": False, "error": value}
+        """Writes field or raw value to wl-copy and serializes token/timer publication under flock."""
+        if not value:
+            if not item_id or not field:
+                return {"ok": False, "error": "No value or item_id provided"}
+            ok, fetched = self.fetch_field(item_id, field)
+            if not ok:
+                return {"ok": False, "error": fetched}
+            value = fetched
+
+        if not shutil.which("wl-copy"):
+            return {"ok": False, "error": "wl-copy is not installed"}
 
         clp = clipboard_lock_path()
         with self.clipboard_lock:
@@ -551,7 +561,6 @@ class OmaPassService:
                 os.chmod(clp, 0o600)
                 fcntl.flock(clf, fcntl.LOCK_EX)
                 try:
-                    # Pipe to wl-copy with structured exception handling
                     try:
                         proc = subprocess.Popen(
                             ["wl-copy"],
@@ -579,8 +588,12 @@ class OmaPassService:
                             pass
 
                     tp = token_path()
-                    # For sensitive fields (password, otp), generate an exclusive token matching this copy
-                    if field in ("password", "otp") and timeout_seconds > 0:
+                    f_lower = (field or "").lower()
+                    is_sensitive = (
+                        not field
+                        or any(s in f_lower for s in ("password", "otp", "cvv", "ccnum", "pin", "card", "secret", "token"))
+                    )
+                    if is_sensitive and timeout_seconds > 0:
                         token = f"{time.time()}-{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
                         unique_tmp = tp.parent / f"omapass-token.{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}.tmp"
                         unique_tmp.write_text(token)
@@ -617,10 +630,10 @@ class OmaPassService:
                         pass
 
         # Desktop notification
-        label = "One-Time Password (TOTP)" if field == "otp" else field.capitalize()
+        label = "One-Time Password (TOTP)" if field == "otp" else (field.capitalize() if field else "Credential")
         name = title or "credential"
         msg = f"Copied {label} for '{name}' to clipboard."
-        if field in ("password", "otp") and timeout_seconds > 0:
+        if timeout_seconds > 0 and is_sensitive:
             msg += f" Clears in {timeout_seconds}s."
 
         try:
@@ -642,14 +655,18 @@ class OmaPassService:
 
         return {"ok": True, "field": field, "title": title, "expiresIn": timeout_seconds}
 
-    def type_credentials(self, item_id: str, field: str) -> Dict[str, Any]:
-        """Types credentials into the active window using wtype with a brief focus delay."""
+    def type_credentials(self, item_id: str = "", field: str = "", value: str = "") -> Dict[str, Any]:
+        """Types credentials into active window using wtype with a brief focus delay."""
         if not shutil.which("wtype"):
             return {"ok": False, "error": "wtype is not installed."}
 
-        ok, value = self.fetch_field(item_id, field)
-        if not ok:
-            return {"ok": False, "error": value}
+        if not value:
+            if not item_id or not field:
+                return {"ok": False, "error": "No value or item_id provided"}
+            ok, fetched = self.fetch_field(item_id, field)
+            if not ok:
+                return {"ok": False, "error": fetched}
+            value = fetched
 
         def _do_type():
             time.sleep(0.35)
@@ -659,7 +676,138 @@ class OmaPassService:
                 pass
 
         threading.Thread(target=_do_type, daemon=True).start()
-        return {"ok": True, "typed": field}
+        return {"ok": True, "typed": field or "value"}
+
+    def get_item(self, item_id: str) -> Dict[str, Any]:
+        """Fetches full item details (fields, urls, notes) with in-memory caching."""
+        if not self.check_op_installed():
+            return {"ok": False, "error": "op CLI not installed"}
+
+        now = time.time()
+        with self.lock:
+            cached = self.item_details_cache.get(item_id)
+            if cached and (now - cached["timestamp"] < 300.0):
+                return {"ok": True, "item": cached["data"]}
+
+        try:
+            res = subprocess.run(
+                ["op", "item", "get", item_id, "--format=json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=12.0,
+            )
+            if res.returncode != 0:
+                return {"ok": False, "error": res.stderr.strip() or "Failed to retrieve item details"}
+
+            raw = json.loads(res.stdout)
+            title = raw.get("title", "Untitled")
+            category = raw.get("category", "OTHER").upper()
+            vault_info = raw.get("vault", {})
+            vault_name = vault_info.get("name", "") if isinstance(vault_info, dict) else ""
+            favorite = bool(raw.get("favorite", False))
+            updated_at = raw.get("updated_at", "")
+
+            urls_list: List[Dict[str, Any]] = []
+            for u in raw.get("urls", []):
+                if isinstance(u, dict) and u.get("href"):
+                    urls_list.append({
+                        "label": u.get("label", "website"),
+                        "href": u["href"],
+                        "primary": bool(u.get("primary", False)),
+                    })
+
+            fields_list: List[Dict[str, Any]] = []
+            notes_text = ""
+            has_otp = False
+            totp_code = ""
+
+            for f in raw.get("fields", []):
+                if not isinstance(f, dict):
+                    continue
+                fid = f.get("id", "")
+                ftype = f.get("type", "STRING")
+                fpurpose = f.get("purpose", "")
+                flabel = f.get("label", fid)
+                fval = f.get("value", "")
+                fsection = ""
+                sec = f.get("section")
+                if isinstance(sec, dict):
+                    fsection = sec.get("label", "")
+
+                if fpurpose == "NOTES" or fid == "notesPlain":
+                    if fval and not notes_text:
+                        notes_text = fval
+                    continue
+
+                if ftype == "OTP":
+                    has_otp = True
+                    if f.get("totp"):
+                        totp_code = str(f.get("totp"))
+
+                concealed = ftype in ("CONCEALED", "CREDIT_CARD_NUMBER") or fpurpose in ("PASSWORD",)
+
+                # Ignore fields with no label and no value
+                if not flabel and not fval:
+                    continue
+
+                fields_list.append({
+                    "id": fid,
+                    "label": flabel,
+                    "value": fval,
+                    "type": ftype,
+                    "purpose": fpurpose,
+                    "section": fsection,
+                    "concealed": concealed,
+                })
+
+            if has_otp and not totp_code:
+                try:
+                    otp_res = subprocess.run(
+                        ["op", "item", "get", item_id, "--otp"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5.0,
+                    )
+                    if otp_res.returncode == 0:
+                        totp_code = otp_res.stdout.strip()
+                except Exception:
+                    pass
+
+            item_data = {
+                "id": item_id,
+                "title": title,
+                "category": category,
+                "vault": vault_name,
+                "favorite": favorite,
+                "updatedAt": updated_at,
+                "urls": urls_list,
+                "notes": notes_text,
+                "fields": fields_list,
+                "totp": totp_code,
+            }
+
+            with self.lock:
+                self.item_details_cache[item_id] = {
+                    "timestamp": now,
+                    "data": item_data,
+                }
+
+            return {"ok": True, "item": item_data}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Fetching item details timed out"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def open_desktop(self, item_id: str) -> Dict[str, Any]:
+        """Opens item in 1Password desktop app via onepassword URI."""
+        uri = f"onepassword://item?i={item_id}"
+        try:
+            subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def open_url(self, url: str) -> Dict[str, Any]:
         """Opens URL in default web browser."""
@@ -688,16 +836,24 @@ class OmaPassService:
             cat = request.get("category", "")
             limit = int(request.get("limit", 50))
             return self.search_items(query=q, category=cat, limit=limit)
+        elif action == "get_item":
+            item_id = request.get("id", "")
+            return self.get_item(item_id=item_id)
+        elif action == "open_desktop":
+            item_id = request.get("id", "")
+            return self.open_desktop(item_id=item_id)
         elif action == "copy":
             item_id = request.get("id", "")
             field = request.get("field", "password")
             title = request.get("title", "")
+            value = request.get("value", "")
             timeout = int(request.get("timeout", DEFAULT_CLIPBOARD_TIMEOUT))
-            return self.copy_to_clipboard(item_id=item_id, field=field, title=title, timeout_seconds=timeout)
+            return self.copy_to_clipboard(item_id=item_id, field=field, title=title, value=value, timeout_seconds=timeout)
         elif action == "type":
             item_id = request.get("id", "")
             field = request.get("field", "password")
-            return self.type_credentials(item_id=item_id, field=field)
+            value = request.get("value", "")
+            return self.type_credentials(item_id=item_id, field=field, value=value)
         elif action == "open_url":
             url = request.get("url", "")
             return self.open_url(url)
