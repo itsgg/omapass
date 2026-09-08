@@ -356,7 +356,7 @@ BarWidget {
     open: root.popupOpen
     contentWidth: popup.fittedContentWidth(Style.space(480))
     contentHeight: root.unlocked
-      ? popup.cappedContentHeight(Style.space(540))
+      ? popup.cappedContentHeight(Style.space(520))
       : popup.fittedContentHeight(lockedColumn.implicitHeight + Style.space(48))
 
     onOpenChanged: {
@@ -1066,81 +1066,89 @@ BarWidget {
         Layout.fillHeight: true
         spacing: Style.space(8)
 
-        // Loading Indicator
-        ColumnLayout {
+        // Loading Indicator (Pixel-Perfect Mathematical Centering)
+        Item {
           visible: root.loadingDetails
           Layout.fillWidth: true
           Layout.fillHeight: true
-          spacing: Style.space(12)
 
-          Item { Layout.fillHeight: true }
+          ColumnLayout {
+            anchors.centerIn: parent
+            spacing: Style.space(14)
 
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: "󰑐"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(34)
-            color: root.colAccent
+            Item {
+              Layout.alignment: Qt.AlignHCenter
+              width: Style.space(40)
+              height: Style.space(40)
 
-            RotationAnimator on rotation {
-              from: 0
-              to: 360
-              duration: 900
-              loops: Animation.Infinite
-              running: root.loadingDetails
+              Text {
+                anchors.centerIn: parent
+                text: "󰦖"
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(32)
+                color: root.colAccent
+                transformOrigin: Item.Center
+
+                RotationAnimator on rotation {
+                  from: 0
+                  to: 360
+                  duration: 900
+                  loops: Animation.Infinite
+                  running: root.loadingDetails
+                }
+              }
+            }
+
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: "Loading item details..."
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              color: root.colForeground
             }
           }
-
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: "Loading item details..."
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            color: root.colDim
-          }
-
-          Item { Layout.fillHeight: true }
         }
 
-        // Error State
-        ColumnLayout {
+        // Error State (Centered)
+        Item {
           visible: !root.loadingDetails && !!root.detailsError
           Layout.fillWidth: true
           Layout.fillHeight: true
-          spacing: Style.space(10)
 
-          Item { Layout.fillHeight: true }
+          ColumnLayout {
+            anchors.centerIn: parent
+            spacing: Style.space(10)
 
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: "󰅙"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(34)
-            color: Color.negative || "#e06c75"
-          }
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: "󰅙"
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(34)
+              color: Color.negative || "#e06c75"
+            }
 
-          Text {
-            Layout.alignment: Qt.AlignHCenter
-            text: root.detailsError
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            color: root.colForeground
-            wrapMode: Text.Wrap
-            horizontalAlignment: Text.AlignHCenter
-            Layout.maximumWidth: Style.space(380)
-          }
+            Text {
+              Layout.alignment: Qt.AlignHCenter
+              text: root.detailsError
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              color: root.colForeground
+              wrapMode: Text.Wrap
+              horizontalAlignment: Text.AlignHCenter
+              Layout.maximumWidth: Style.space(380)
+            }
 
-          Button {
-            Layout.alignment: Qt.AlignHCenter
-            text: "Retry"
-            iconText: "󰑐"
-            accent: root.colAccent
-            onClicked: {
-              if (root.selectedItem) root.showItemDetails(root.selectedItem)
+            Button {
+              Layout.alignment: Qt.AlignHCenter
+              text: "Retry"
+              iconText: "󰑐"
+              accent: root.colAccent
+              onClicked: {
+                if (root.selectedItem) root.showItemDetails(root.selectedItem)
+              }
             }
           }
-
-          Item { Layout.fillHeight: true }
         }
 
         // Scrollable Details Body
@@ -1159,9 +1167,9 @@ BarWidget {
             width: parent.width
             spacing: Style.space(8)
 
-            // TOTP Highlight Banner
+            // TOTP Highlight Banner (Only if TOTP exists)
             BorderSurface {
-              visible: !!(root.itemDetails && root.itemDetails.totp)
+              visible: !!(root.itemDetails && root.itemDetails.totp && String(root.itemDetails.totp).trim().length > 0)
               Layout.fillWidth: true
               Layout.preferredHeight: Style.space(56)
               radius: Style.cornerRadius
@@ -1217,7 +1225,7 @@ BarWidget {
               }
             }
 
-            // Fields Header
+            // Fields Header (Only if fields with content exist)
             PanelSectionHeader {
               visible: !!(root.itemDetails && root.itemDetails.fields && root.itemDetails.fields.length > 0)
               text: "CREDENTIALS & FIELDS"
@@ -1225,7 +1233,7 @@ BarWidget {
               fontFamily: root.fontFamily
             }
 
-            // Fields Repeater
+            // Fields Repeater (Only fields with valid content)
             Repeater {
               model: (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
               delegate: BorderSurface {
@@ -1234,11 +1242,17 @@ BarWidget {
                 required property int index
                 property bool revealed: false
 
+                // Strictly filter out any field with empty content
+                visible: !!(modelData && modelData.value && String(modelData.value).trim().length > 0)
                 Layout.fillWidth: true
-                Layout.preferredHeight: Style.space(52)
+                Layout.preferredHeight: visible ? Style.space(52) : 0
                 radius: Style.cornerRadius
-                color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
-                borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+                color: fieldHover.hovered
+                  ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
+                  : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+                borderSpec: Border.controlSpec(fieldHover.hovered ? "hover-cursor" : "normal", root.colForeground, root.colAccent)
+
+                HoverHandler { id: fieldHover }
 
                 RowLayout {
                   anchors.fill: parent
@@ -1271,12 +1285,12 @@ BarWidget {
                       Layout.fillWidth: true
                       text: (modelData.concealed && !fieldCard.revealed)
                         ? Model.maskText(modelData.value)
-                        : (modelData.value || "—")
+                        : (modelData.value || "")
                       font.family: (modelData.concealed && !fieldCard.revealed)
                         ? root.fontFamily
                         : "JetBrainsMono Nerd Font, monospace"
                       font.pixelSize: Style.font.body
-                      color: modelData.value ? root.colForeground : root.colDim
+                      color: root.colForeground
                       elide: Text.ElideRight
                     }
                   }
@@ -1321,7 +1335,7 @@ BarWidget {
               }
             }
 
-            // Websites Header
+            // Websites Header (Only if URLs with content exist)
             PanelSectionHeader {
               visible: !!(root.itemDetails && root.itemDetails.urls && root.itemDetails.urls.length > 0)
               text: "WEBSITES"
@@ -1335,8 +1349,10 @@ BarWidget {
               delegate: BorderSurface {
                 required property var modelData
                 required property int index
+
+                visible: !!(modelData && modelData.href && String(modelData.href).trim().length > 0)
                 Layout.fillWidth: true
-                Layout.preferredHeight: Style.space(42)
+                Layout.preferredHeight: visible ? Style.space(42) : 0
                 radius: Style.cornerRadius
                 color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
                 borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
@@ -1384,9 +1400,9 @@ BarWidget {
               }
             }
 
-            // Notes Header
+            // Notes Header (Only if non-empty notes exist)
             PanelSectionHeader {
-              visible: !!(root.itemDetails && root.itemDetails.notes)
+              visible: !!(root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0)
               text: "SECURE NOTES"
               foreground: root.colForeground
               fontFamily: root.fontFamily
@@ -1394,7 +1410,7 @@ BarWidget {
 
             // Notes Card
             BorderSurface {
-              visible: !!(root.itemDetails && root.itemDetails.notes)
+              visible: !!(root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0)
               Layout.fillWidth: true
               Layout.preferredHeight: Math.min(Style.space(130), Math.max(Style.space(64), notesText.implicitHeight + Style.space(24)))
               radius: Style.cornerRadius
@@ -1429,7 +1445,7 @@ BarWidget {
                   TextEdit {
                     id: notesText
                     width: parent.width
-                    text: root.itemDetails ? root.itemDetails.notes : ""
+                    text: (root.itemDetails && root.itemDetails.notes) ? root.itemDetails.notes : ""
                     font.family: "JetBrainsMono Nerd Font, monospace"
                     font.pixelSize: Style.font.caption
                     color: root.colForeground
@@ -1439,6 +1455,34 @@ BarWidget {
                   }
                 }
               }
+            }
+
+            // Fallback if item has literally no fields, no notes, no urls
+            ColumnLayout {
+              visible: !!(root.itemDetails && (!root.itemDetails.fields || root.itemDetails.fields.length === 0) && !root.itemDetails.notes && (!root.itemDetails.urls || root.itemDetails.urls.length === 0) && !root.itemDetails.totp)
+              Layout.fillWidth: true
+              Layout.preferredHeight: Style.space(100)
+              spacing: Style.space(8)
+
+              Item { Layout.fillHeight: true }
+
+              Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "󰋽"
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(28)
+                color: root.colDim
+              }
+
+              Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "No credentials or fields recorded for this item"
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                color: root.colDim
+              }
+
+              Item { Layout.fillHeight: true }
             }
 
             Item { Layout.preferredHeight: Style.space(4) }

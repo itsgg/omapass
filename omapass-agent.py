@@ -711,11 +711,13 @@ class OmaPassService:
             urls_list: List[Dict[str, Any]] = []
             for u in raw.get("urls", []):
                 if isinstance(u, dict) and u.get("href"):
-                    urls_list.append({
-                        "label": u.get("label", "website"),
-                        "href": u["href"],
-                        "primary": bool(u.get("primary", False)),
-                    })
+                    href_str = str(u["href"]).strip()
+                    if href_str:
+                        urls_list.append({
+                            "label": u.get("label", "website"),
+                            "href": href_str,
+                            "primary": bool(u.get("primary", False)),
+                        })
 
             fields_list: List[Dict[str, Any]] = []
             notes_text = ""
@@ -735,9 +737,9 @@ class OmaPassService:
                 if isinstance(sec, dict):
                     fsection = sec.get("label", "")
 
-                if fpurpose == "NOTES" or fid == "notesPlain":
+                if fpurpose == "NOTES" or fid == "notesPlain" or flabel.lower() in ("notes", "secure notes"):
                     if fval and not notes_text:
-                        notes_text = fval
+                        notes_text = str(fval).strip()
                     continue
 
                 if ftype == "OTP":
@@ -747,19 +749,42 @@ class OmaPassService:
 
                 concealed = ftype in ("CONCEALED", "CREDIT_CARD_NUMBER") or fpurpose in ("PASSWORD",)
 
-                # Ignore fields with no label and no value
-                if not flabel and not fval:
+                # Filter out any field with no content
+                val_str = str(fval).strip() if fval is not None else ""
+                if not val_str:
                     continue
 
+                display_label = flabel or fid
+                # Clean up ugly field IDs like "customField1" if label is missing
                 fields_list.append({
                     "id": fid,
-                    "label": flabel,
-                    "value": fval,
+                    "label": display_label,
+                    "value": val_str,
                     "type": ftype,
                     "purpose": fpurpose,
                     "section": fsection,
                     "concealed": concealed,
                 })
+
+            def _field_priority(f: Dict[str, Any]) -> int:
+                fid = f.get("id", "").lower()
+                purpose = f.get("purpose", "").upper()
+                lbl = f.get("label", "").lower()
+                if purpose == "USERNAME" or "username" in fid or "email" in fid or "user" in fid or "login" in fid:
+                    return 0
+                if purpose == "PASSWORD" or "password" in fid or "pin" in fid or "pass" in lbl:
+                    return 1
+                if "ccnum" in fid or "card" in fid or "cardnumber" in lbl:
+                    return 2
+                if "expiry" in fid or "exp" in fid or "month" in fid or "year" in fid:
+                    return 3
+                if "cvv" in fid or "verification" in fid or "security" in lbl:
+                    return 4
+                if "cardholder" in fid or "holder" in lbl:
+                    return 5
+                return 10
+
+            fields_list.sort(key=_field_priority)
 
             if has_otp and not totp_code:
                 try:
