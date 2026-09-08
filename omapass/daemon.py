@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from .config import DETAILS_CACHE_TTL, MAX_REQUEST_BYTES, PROTOCOL_VERSION
+from .config import build_id, DETAILS_CACHE_TTL, MAX_REQUEST_BYTES, PROTOCOL_VERSION
 from .paths import (
     daemon_lock_path,
     daemon_pid_path,
@@ -67,29 +67,48 @@ def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optio
         sock.close()
 
 
-def running_daemon_version() -> Optional[int]:
-    """The protocol version of the daemon answering right now, if any."""
+def daemon_is_current() -> Optional[bool]:
+    """Whether the daemon answering is running this exact code.
+
+    None when nothing answers. The build id catches an edit that did not come
+    with a version bump, which is the case that used to leave a daemon quietly
+    serving old behaviour to a freshly updated widget.
+    """
     pong = send_socket_request({"action": "ping"}, timeout=0.5)
     if pong is None:
         return None
     try:
-        return int(pong.get("version", 0))
+        version = int(pong.get("version", 0))
     except (TypeError, ValueError):
-        return 0
+        version = 0
+    return version == PROTOCOL_VERSION and pong.get("build") == build_id()
 
 
 def _is_our_daemon(pid: int) -> bool:
     """True only for a process running this exact entry script as `serve`.
 
-    Matched on the full resolved script path, not a loose substring, and every
-    candidate is checked in /proc before anything is signalled.
+    The pid comes from our own pid file in our own runtime directory, which
+    nothing else writes, so this is a second opinion rather than the only one.
+    It matches the script by name and not by full path: an install that has
+    moved, or a daemon started through a relative path, would otherwise fail
+    to match its own daemon and could never replace it.
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             argv = f.read().decode("utf-8", "replace").split("\0")
     except OSError:
         return False
-    return str(entry_script()) in argv and "serve" in argv
+    # `vim omapass-agent.py serve` has the same shape as our own command
+    # line, so the shape alone is not enough: the process also has to be a
+    # Python. Reached only for a pid out of our own pid file, and even then a
+    # recycled pid is exactly what this exists to catch.
+    if not argv or not pathlib.Path(argv[0]).name.startswith("python"):
+        return False
+    wanted = pathlib.Path(str(entry_script())).name
+    for i, arg in enumerate(argv[:-1]):
+        if arg and pathlib.Path(arg).name == wanted and argv[i + 1] == "serve":
+            return True
+    return False
 
 
 def _daemon_pid_from_file() -> Optional[int]:
@@ -100,25 +119,19 @@ def _daemon_pid_from_file() -> Optional[int]:
     return pid if _is_our_daemon(pid) else None
 
 
-def _daemon_pid_from_proc() -> Optional[int]:
-    """Fallback for a daemon old enough to predate the pid file."""
-    try:
-        candidates = [int(e) for e in os.listdir("/proc") if e.isdigit()]
-    except OSError:
-        return None
-    for pid in candidates:
-        if pid != os.getpid() and _is_our_daemon(pid):
-            return pid
-    return None
-
-
 def stop_stale_daemon() -> None:
     """Stops a daemon left over from an older version of the plugin.
 
-    Identified from its own lock file and checked against /proc before any
-    signal is sent, so a recycled pid cannot make this kill something else.
+    The pid comes only from our own pid file, in our own runtime directory,
+    which nothing else writes. There used to be a fallback that scanned every
+    pid in /proc for one that looked like ours; it is gone. Combined with any
+    loosening of the match below it would have signalled whatever else on the
+    machine happened to mention this script, which is the whole reason not to
+    identify a process by a substring of its command line.
     """
-    pid = _daemon_pid_from_file() or _daemon_pid_from_proc()
+    # _daemon_pid_from_file returns None for a pid that is not ours, which
+    # covers the pid file outliving its process and the number being reused.
+    pid = _daemon_pid_from_file()
     if pid is None:
         return
     try:
@@ -139,21 +152,24 @@ def ensure_daemon() -> bool:
     goes on answering. Reporting that rather than assuming success is what
     lets the caller refuse to talk to it.
     """
-    version = running_daemon_version()
-    if version == PROTOCOL_VERSION:
+    if daemon_is_current() is True:
         return True
-    if version is not None:
-        # Serving, but from an older build of the plugin.
-        stop_stale_daemon()
 
     # Serialize startup across concurrent calls
     slp = startup_lock_path()
     with open_private(slp) as sf:
         try:
             fcntl.flock(sf, fcntl.LOCK_EX)
-            # Re-check under lock; another process may have just started the daemon
-            if running_daemon_version() == PROTOCOL_VERSION:
+            # Re-check under lock; another process may have just started
+            # the daemon.
+            # Anything but True, so a daemon that has hung is stopped as well
+            # as one running other code: it answers no ping, but it still
+            # holds the lifetime lock, so every replacement would exit at once
+            # and the machine would never get a working daemon again.
+            # stop_stale_daemon does nothing when there is nothing to stop.
+            if daemon_is_current() is True:
                 return True
+            stop_stale_daemon()
 
             script_path = entry_script()
             subprocess.Popen(
@@ -168,7 +184,7 @@ def ensure_daemon() -> bool:
             # as success is how a request reaches the build we just replaced.
             for _ in range(15):
                 time.sleep(0.1)
-                if running_daemon_version() == PROTOCOL_VERSION:
+                if daemon_is_current() is True:
                     return True
             return False
         finally:
@@ -220,6 +236,9 @@ def run_daemon(install_signals: bool = True, on_ready=None):
             pass
 
     write_private(daemon_pid_path(), str(os.getpid()))
+    # Pinned before serving, so this daemon keeps reporting the code it
+    # actually loaded even after the files on disk are updated under it.
+    build_id()
     sweep_orphaned_templates()
 
     service = OmaPassService()

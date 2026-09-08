@@ -4,6 +4,8 @@ Kept apart from behaviour so the numbers that govern how long a secret lives
 are in one place and can be read without reading the daemon.
 """
 
+import hashlib
+import pathlib
 import re
 
 PLUGIN_ID = "gg.omapass"
@@ -18,7 +20,57 @@ PLUGIN_ID = "gg.omapass"
 #    statements rather than a JSON template. A version 3 daemon left running
 #    across the upgrade would still edit through a template, which op
 #    documents as overwriting an item's passkey, so it has to be replaced.
-PROTOCOL_VERSION = 4
+# 5: ping carries a build id as well, and writes update the cached item list
+#    before answering. A version 4 daemon answers a create without touching
+#    that list, so the new item does not appear until a sync happens to land.
+PROTOCOL_VERSION = 5
+
+
+_BUILD_ID_CACHE = ""
+
+
+def build_id() -> str:
+    """A fingerprint of the helper code this process actually loaded.
+
+    The version above documents deliberate changes to the wire contract, but
+    it only replaces a running daemon if someone remembers to raise it, and
+    forgetting is silent: the old daemon keeps answering with its old
+    behaviour while the new code sits on disk unused. That has happened, so
+    the source speaks for itself as well.
+
+    Computed from the package directory plus the entry script, and not from
+    the modules this process happens to have imported: the daemon reaches the
+    code through cli.py and a caller need not, so an import-set fingerprint
+    had the two disagree forever and no daemon was ever current.
+
+    Cached, because in the daemon this must keep naming the code it started
+    with even if the files on disk change underneath it.
+    """
+    global _BUILD_ID_CACHE
+    if _BUILD_ID_CACHE:
+        return _BUILD_ID_CACHE
+
+    from . import paths
+
+    package = pathlib.Path(__file__).resolve().parent
+    sources = {path.resolve() for path in package.glob("*.py")}
+    entry = paths.entry_script()
+    if entry:
+        sources.add(pathlib.Path(str(entry)).resolve())
+
+    digest = hashlib.sha256()
+    for path in sorted(sources):
+        # The name, so moving code between modules is a change, but not the
+        # directory, so the same code installed twice matches.
+        digest.update(path.name.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            # A source we cannot read is still part of the build, and
+            # skipping it silently would let two different installs agree.
+            digest.update(b"<unreadable>")
+    _BUILD_ID_CACHE = digest.hexdigest()[:16]
+    return _BUILD_ID_CACHE
 DEFAULT_CLIPBOARD_TIMEOUT = 30
 MAX_CLIPBOARD_TIMEOUT = 3600
 

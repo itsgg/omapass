@@ -29,6 +29,7 @@ from .clipboard import (
 )
 from .config import (
     AUTH_ERROR_MARKERS,
+    build_id,
     PROTOCOL_VERSION,
     DEFAULT_PASSWORD_RECIPE,
     PASSWORD_RECIPE_RE,
@@ -2020,6 +2021,7 @@ class OmaPassService:
             url = request.get("url", "")
             return self.open_url(url)
         elif action == "ping":
-            return {"ok": True, "pong": time.time(), "version": PROTOCOL_VERSION}
+            return {"ok": True, "pong": time.time(),
+                    "version": PROTOCOL_VERSION, "build": build_id()}
         else:
             return {"ok": False, "error": f"Unknown action '{action}'"}
