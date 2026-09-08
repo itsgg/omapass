@@ -12,7 +12,7 @@ Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates dir
 - 󰌆 **Category-aware actions**: a credit card has no password, username or TOTP, so it is offered its card number, cardholder and CVV instead. The row buttons, the <kbd>Enter</kbd> chords and the footer hint all follow the highlighted item.
 - 󰓎 **Fast In-Memory Search**: Substring and subsequence ("gthb" finds "GitHub") matching across titles, usernames, URLs, and vaults as you type.
 - 󰤯 **Category Filtering**: Quick filter chips for *Logins*, *Credit Cards*, *Secure Notes*, and *Favorites*.
-- 󰌏 **Biometric & System Unlock**: Leverages 1Password CLI (`op`) and the desktop app's CLI integration.
+- 󰌏 **Biometric unlock**: authorization goes through the desktop app's CLI integration, so unlocking is the same fingerprint prompt as the app itself.
 - 🎨 **Unified Omarchy Theming**: Automatically inherits your Omarchy colors, borders, font family, and blur.
 - 🛡️ **Secret Isolation**: Decrypted secrets are fetched on demand, held in the helper's memory for at most 90 seconds, and piped straight to `wl-copy`. Every copy is wiped from the clipboard after `clipboardTimeout` seconds.
 
@@ -115,7 +115,7 @@ code outlives its 30-second window long before the cache entry expires.
 - `1password-cli` (`op` >= 2.20)
 - `wl-clipboard` (`wl-copy`)
 - `notify-send` (libnotify)
-- *(Optional)* `1password` desktop app running with "Integrate with 1Password CLI" enabled for biometric/fingerprint unlock.
+- `1password` desktop app, with **Settings > Developer > Integrate with 1Password CLI** enabled. This is required, not optional: it is what authorizes `op`, and what makes Unlock a fingerprint prompt rather than a password.
 
 ## Installation
 

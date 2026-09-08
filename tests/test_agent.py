@@ -898,6 +898,16 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
         self.assertIn("--sensitive", seen["argv"])
 
+    def test_unlock_says_so_when_the_desktop_app_is_missing(self):
+        """No terminal fallback: a manual op signin cannot reach this daemon."""
+        with patch("shutil.which", side_effect=lambda n: "/usr/bin/op" if n == "op" else None):
+            with patch("subprocess.Popen") as mock_popen:
+                res = self.service.unlock()
+
+        self.assertFalse(res["ok"])
+        self.assertIn("desktop app", res["error"])
+        mock_popen.assert_not_called()
+
     def test_normalize_url(self):
         self.assertEqual(fields.normalize_url("github.com"), "https://github.com")
         self.assertEqual(fields.normalize_url("http://x.test/a"), "http://x.test/a")

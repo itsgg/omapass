@@ -450,27 +450,18 @@ class OmaPassService:
             except Exception:
                 pass
 
-        term = os.environ.get("TERMINAL")
-        if not term:
-            for candidate in ["alacritty", "foot", "kitty", "ghostty", "xterm"]:
-                if shutil.which(candidate):
-                    term = candidate
-                    break
-
-        if term:
-            try:
-                cmd = "op signin && sleep 1"
-                subprocess.Popen(
-                    [term, "-e", "bash", "-c", cmd],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return {"ok": True, "method": "terminal", "message": f"Launched terminal signin via {term}"}
-            except Exception:
-                pass
-
-        return {"ok": False, "error": "Could not launch unlock prompt."}
+        # There is deliberately no terminal `op signin` fallback. A manual
+        # sign-in exports its session token into that terminal's environment,
+        # which this daemon never sees, so the user would sign in and stay
+        # locked. Carrying the token across would mean writing it to disk,
+        # which is exactly what this helper promises not to do.
+        if not shutil.which("op"):
+            return {"ok": False, "error": "1Password CLI (op) is not installed."}
+        return {
+            "ok": False,
+            "error": "OmaPass needs the 1Password desktop app with "
+                     "'Integrate with 1Password CLI' enabled.",
+        }
 
     def lock_vault(self) -> Dict[str, Any]:
         """Locks 1Password, immediately clears clipboard, and clears metadata cache."""
