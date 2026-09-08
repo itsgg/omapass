@@ -467,7 +467,7 @@ BarWidget {
             root.detailsError = ""
             // The code in the item payload has an unknown amount of its window
             // left, so fetch one whose expiry we actually know.
-            if (resp.item.totp) Qt.callLater(root.refreshTotp)
+            if (resp.item.hasTotp || resp.item.totp) Qt.callLater(root.refreshTotp)
           } else {
             root.detailsError = resp.error || "Failed to retrieve item details"
           }
@@ -558,6 +558,14 @@ BarWidget {
   // refreshes on that boundary rather than on a free-running interval, and it
   // says how long the displayed code has left instead of quietly going stale.
   readonly property int totpPeriod: 30000
+
+  // Whether the open item has a one-time password at all. `hasTotp` survives
+  // the helper's cache, where the code itself deliberately does not; the
+  // fallback covers a helper still running an older build, which happens
+  // whenever the plugin is updated without restarting the daemon.
+  readonly property bool itemHasTotp: !!(root.itemDetails
+    && (root.itemDetails.hasTotp
+        || (root.itemDetails.totp && String(root.itemDetails.totp).trim().length > 0)))
   property string freshTotp: ""
   property double totpExpiresAt: 0
   property double totpNow: 0
@@ -614,7 +622,7 @@ BarWidget {
 
   // Try again on the next window boundary rather than giving up for good.
   function scheduleTotpRetry() {
-    if (!root.itemDetails || !root.itemDetails.totp) return
+    if (!root.itemHasTotp) return
     var now = Date.now()
     totpTimer.interval = Math.max(2000, root.totpPeriod - (now % root.totpPeriod) + 500)
     totpTimer.restart()
@@ -623,7 +631,7 @@ BarWidget {
   function refreshTotp() {
     if (otpProc.running) return
     if (!root.itemDetails || !root.itemDetails.id) return
-    if (!root.itemDetails.totp) return
+    if (!root.itemHasTotp) return
     otpProc.requestedId = String(root.itemDetails.id)
     root.runHelper(otpProc, { action: "otp", id: otpProc.requestedId })
   }
@@ -644,7 +652,7 @@ BarWidget {
     repeat: true
     running: root.popupOpen
       && root.currentView === "details"
-      && !!(root.itemDetails && root.itemDetails.totp)
+      && root.itemHasTotp
     onTriggered: root.totpNow = Date.now()
   }
 
@@ -1829,7 +1837,7 @@ BarWidget {
 
             // TOTP Highlight Banner (Only if TOTP exists)
             BorderSurface {
-              visible: !!(root.itemDetails && root.itemDetails.totp && String(root.itemDetails.totp).trim().length > 0)
+              visible: root.itemHasTotp
               Layout.fillWidth: true
               Layout.preferredHeight: Style.space(56)
               radius: Style.cornerRadius
@@ -2147,7 +2155,7 @@ BarWidget {
 
             // Fallback if item has literally no fields, no notes, no urls
             ColumnLayout {
-              visible: !!(root.itemDetails && (!root.itemDetails.fields || root.itemDetails.fields.length === 0) && !root.itemDetails.notes && (!root.itemDetails.urls || root.itemDetails.urls.length === 0) && !root.itemDetails.totp)
+              visible: !!(root.itemDetails && (!root.itemDetails.fields || root.itemDetails.fields.length === 0) && !root.itemDetails.notes && (!root.itemDetails.urls || root.itemDetails.urls.length === 0) && !root.itemHasTotp)
               Layout.fillWidth: true
               Layout.preferredHeight: Style.space(100)
               spacing: Style.space(8)

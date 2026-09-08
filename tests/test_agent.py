@@ -198,6 +198,47 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.assertEqual(cached_res["item"]["title"], "Amazon")
             mock_run.assert_not_called()
 
+    @patch("subprocess.run")
+    def test_totp_is_never_written_to_the_details_cache(self, mock_run):
+        """The README says TOTP is never cached; make that true, not aspirational."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
+            "id": "t1", "title": "Bank", "category": "LOGIN",
+            "fields": [
+                {"id": "password", "type": "CONCEALED", "purpose": "PASSWORD",
+                 "label": "password", "value": "pw"},
+                {"id": "totp", "type": "OTP", "purpose": "", "label": "one-time password",
+                 "value": "otpauth://totp/x?secret=SEED", "totp": "123456"},
+            ],
+        }))
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("t1")
+
+        # The caller is given the code once, for the first render.
+        self.assertEqual(res["item"]["totp"], "123456")
+        # It is not retained...
+        self.assertEqual(self.service.item_details_cache["t1"]["data"]["totp"], "")
+        # ...but the fact that this item has one is, or reopening it within the
+        # cache window would hide the TOTP banner and never refresh it.
+        self.assertTrue(res["item"]["hasTotp"])
+        self.assertTrue(self.service.item_details_cache["t1"]["data"]["hasTotp"])
+
+        # A cache hit still advertises the TOTP, with no code attached.
+        again = self.service.get_item("t1")
+        self.assertTrue(again["item"]["hasTotp"])
+        self.assertEqual(again["item"]["totp"], "")
+
+    @patch("subprocess.run")
+    def test_item_without_totp_is_not_marked_as_having_one(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
+            "id": "n1", "title": "Plain", "category": "LOGIN",
+            "fields": [{"id": "password", "type": "CONCEALED", "purpose": "PASSWORD",
+                        "label": "password", "value": "pw"}],
+        }))
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("n1")
+        self.assertFalse(res["item"]["hasTotp"])
+
     @patch("subprocess.Popen")
     def test_open_desktop(self, mock_popen):
         res = self.service.open_desktop("item123")

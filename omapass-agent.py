@@ -1296,6 +1296,9 @@ class OmaPassService:
                 "notes": notes_text,
                 "fields": fields_list,
                 "totp": totp_code,
+                # Survives caching, unlike the code itself, so the UI still
+                # knows to show the banner and fetch a live code on reopen.
+                "hasTotp": bool(has_otp or totp_code),
             }
 
             with self.lock:
@@ -1303,9 +1306,15 @@ class OmaPassService:
                     # The vault was locked while this was in flight. Dropping
                     # the result keeps lock meaning "the secrets are gone".
                     return {"ok": False, "error": "Vault was locked during this request"}
+                # The cache never keeps a one-time code. It is valid for one
+                # 30s window, so a cached copy is stale by definition, and
+                # holding it only widens the window in which it can leak. The
+                # caller gets this one; the next code is fetched live.
+                cached_copy = dict(item_data)
+                cached_copy["totp"] = ""
                 self.item_details_cache[item_id] = {
                     "timestamp": time.time(),
-                    "data": item_data,
+                    "data": cached_copy,
                 }
             self._note_op_success()
 

@@ -86,16 +86,28 @@ bindd = SUPER, P, 1Password, exec, omarchy-shell gg.omapass toggle
 | Data | Where | Lifetime |
 | --- | --- | --- |
 | Item metadata (title, username, URL, vault, category) | `$XDG_RUNTIME_DIR/omapass-cache.json`, mode 0600 | Until `lock`, or the tmpfs is cleared at logout |
-| Decrypted fields (passwords, notes) | Helper process memory only | Never served after 90 seconds; purged from memory within 99, or at once on `lock` |
-| TOTP codes | Never cached | Refetched on display (every 25s) and on every copy |
+| Decrypted fields (passwords, notes) | Helper process memory | Never served after 90 seconds; purged from memory within 99, or at once on `lock` |
+| The open item's fields | The widget, while its details view is open | Dropped when you go back, close the popup, or lock |
+| TOTP codes | Never in the helper's cache; the widget holds the one on screen | Replaced each 30s window while the item is open, and refetched for every copy |
 | Clipboard contents | Wayland clipboard | `clipboardTimeout` seconds (default 30) |
+
+Opening an item's details necessarily puts its fields in the widget so it can
+show them; that copy is dropped the moment you leave the view. Copying names a
+field rather than passing its value, so a credential never travels through a
+command line where the rest of the machine could read it.
 
 Nothing decrypted is ever written to disk. The metadata cache is *not* proof
 the vault is still unlocked: that verdict expires after 8 hours, in a running
 helper as well as across a restart, and any authorization error from `op`
 revokes it at once and is remembered so a restart cannot undo it. Item titles
-and usernames survive in the cache so the list still renders; the secrets do
-not, and every copy re-asks 1Password.
+and usernames survive in the cache so the list still renders; the decrypted
+fields do not.
+
+A copy made within 90 seconds of the helper first reading an item is served
+from its cache rather than re-asking `op`, which is what makes it instant. That
+window runs from the original fetch, not from each time you open the item. A
+one-time password is the exception and is always fetched live, since a cached
+code outlives its 30-second window long before the cache entry expires.
 
 ## Requirements
 
