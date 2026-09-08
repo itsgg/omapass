@@ -764,8 +764,67 @@ BarWidget {
     createForm.selectCategory(id)
   }
 
+  // Editing reuses the create form: the same spec decides which fields are
+  // shown. The helper preserves everything the form does not show, so a
+  // narrow form cannot cost the user their custom fields.
+  function startEdit() {
+    if (!root.itemDetails) return
+    var d = root.itemDetails
+    root.currentView = "create"
+    createForm.editingId = d.id
+    createForm.category = String(d.category || "LOGIN").toUpperCase()
+    var values = { title: d.title || "" }
+    for (var i = 0; i < (d.fields || []).length; i++) {
+      var f = d.fields[i]
+      values[f.id] = f.value || ""
+    }
+    if (d.urls && d.urls.length > 0) values.url = d.urls[0].href || ""
+    createForm.loadValues(values)
+    root.refreshVaults()
+    Qt.callLater(function() { createForm.focusFirst() })
+  }
+
+  function submitEdit(payload) {
+    if (root.creating) return
+    root.creating = true
+    createForm.submitError = ""
+    createForm.busy = true
+    var changes = ({})
+    for (var k in payload.fields) changes[k] = payload.fields[k].value
+    runAction({
+      action: "edit_item",
+      id: createForm.editingId,
+      title: payload.title,
+      url: payload.url,
+      changes: changes
+    }, "Saved " + payload.title)
+  }
+
+  // --- removing an item ----------------------------------------------------
+  property string pendingDeleteId: ""
+  property string pendingDeleteTitle: ""
+
+  function askDelete() {
+    if (!root.itemDetails) return
+    root.pendingDeleteId = root.itemDetails.id
+    root.pendingDeleteTitle = root.itemDetails.title || "this item"
+    deleteConfirm.opened = true
+  }
+
+  function confirmDelete() {
+    var id = root.pendingDeleteId
+    var title = root.pendingDeleteTitle
+    root.pendingDeleteId = ""
+    deleteConfirm.opened = false
+    if (!id) return
+    root.backToList()
+    runAction({ action: "delete_item", id: id, archive: true },
+              "Archived " + title)
+  }
+
   function cancelCreate() {
     root.creating = false
+    createForm.editingId = ""
     createForm.reset("")
     root.currentView = "list"
     Qt.callLater(function() { searchInput.forceActiveFocus() })
@@ -853,7 +912,8 @@ BarWidget {
             if (job && job.successToast) root.showToast(job.successToast)
           } else {
             root.lastActionFailed = true
-            if (job && job.payload.action === "create_item") {
+            if (job && (job.payload.action === "create_item"
+                        || job.payload.action === "edit_item")) {
               createForm.submitError = resp.error || "Could not create the item"
             }
             root.showToast(resp.error || "Action failed")
@@ -1304,6 +1364,24 @@ BarWidget {
               }
             }
           }
+        }
+
+        Button {
+          iconText: "󰏫"
+          tooltipText: "Edit this item (e)"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: root.startEdit()
+        }
+
+        Button {
+          iconText: "󰩺"
+          tooltipText: "Move to the 1Password archive (Del)"
+          accent: root.colAccent
+          horizontalPadding: Style.space(6)
+          verticalPadding: Style.space(4)
+          onClicked: root.askDelete()
         }
 
         Button {
@@ -1811,7 +1889,7 @@ BarWidget {
 
           Text {
             Layout.fillWidth: true
-            text: "New " + createForm.spec.label.toLowerCase()
+            text: (createForm.editing ? "Edit " : "New ") + createForm.spec.label.toLowerCase()
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
@@ -1822,9 +1900,11 @@ BarWidget {
           Text {
             Layout.fillWidth: true
             // Only some categories have a field 1Password can generate.
-            text: createForm.canGenerate
-              ? "1Password generates the password unless you type one"
-              : "Stored in your vault, never on disk"
+            text: createForm.editing
+              ? "Fields not shown here are left exactly as they are"
+              : (createForm.canGenerate
+                  ? "1Password generates the password unless you type one"
+                  : "Stored in your vault, never on disk")
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption - 1
             color: root.colDim
@@ -1844,7 +1924,10 @@ BarWidget {
         vaultsLoading: vaultsProc.running
         onVaultsRequested: root.refreshVaults()
         onCancelled: root.cancelCreate()
-        onSubmitted: function(payload) { root.submitCreate(payload) }
+        onSubmitted: function(payload) {
+          if (createForm.editingId) root.submitEdit(payload)
+          else root.submitCreate(payload)
+        }
       }
 
 
@@ -1865,6 +1948,12 @@ BarWidget {
         Keys.onReturnPressed: root.copyFocusedDetailField()
         Keys.onEnterPressed: root.copyFocusedDetailField()
         Keys.onPressed: function(event) {
+          // While the confirmation is up it owns the keyboard, or Escape and
+          // Enter would act on the item behind it.
+          if (deleteConfirm.opened) {
+            event.accepted = deleteConfirm.handleKey(event)
+            return
+          }
           if (root.handleReadlineChord(event, true)) {
             event.accepted = true
             return
@@ -1879,6 +1968,8 @@ BarWidget {
             }
             event.accepted = true
             break
+          case Qt.Key_E: root.startEdit(); event.accepted = true; break
+          case Qt.Key_Delete: root.askDelete(); event.accepted = true; break
           case Qt.Key_Home: root.detailIndex = 0; event.accepted = true; break
           case Qt.Key_End: root.detailIndex = Math.max(0, root.detailFields.length - 1); event.accepted = true; break
           }
@@ -2272,6 +2363,26 @@ BarWidget {
         theme: appTheme
         message: root.statusToast
       }
+    // Overlay, not a layout child: ConfirmDialog paints a scrim across its
+    // parent, so inside the column it was laid out with no size and never
+    // appeared.
+    // Removing an item changes someone's vault in a way they might not have
+    // meant, so it asks first, and it archives rather than deletes, which
+    // the 1Password app can undo.
+    ConfirmDialog {
+      id: deleteConfirm
+      anchors.fill: parent
+      z: 100
+      opened: false
+      message: "Move \"" + root.pendingDeleteTitle + "\" to the 1Password archive?"
+      confirmText: "Archive"
+      cancelText: "Keep"
+      background: root.colSurface
+      foreground: root.colForeground
+      onConfirmed: root.confirmDelete()
+      onCanceled: root.pendingDeleteId = ""
+    }
+
   }
 }
 }

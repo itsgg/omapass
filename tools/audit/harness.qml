@@ -193,6 +193,19 @@ ShellRoot {
       }
     }
 
+    if (harness.state === "details-edit") {
+      widget.selectedItem = harness.loginItem
+      widget.itemDetails = harness.detailsFixture("details")
+      widget.currentView = "details"
+      widget.vaults = [{ id: "v1", name: "Personal" }]
+      widget.startEdit()
+    }
+    if (harness.state === "details-delete") {
+      widget.selectedItem = harness.loginItem
+      widget.itemDetails = harness.detailsFixture("details")
+      widget.currentView = "details"
+      widget.askDelete()
+    }
     if (harness.state === "create-card" || harness.state === "create-note") {
       widget.vaults = [{ id: "v1", name: "Personal" }]
       widget.startCreate(harness.state === "create-card" ? "Acme Bank Visa" : "Recovery codes")

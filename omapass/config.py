@@ -13,7 +13,7 @@ PLUGIN_ID = "gg.omapass"
 # widget asking for an action it does not know about just gets "Unknown
 # action". The version is checked on every connect so a stale daemon is
 # replaced instead of quietly answering wrong.
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 DEFAULT_CLIPBOARD_TIMEOUT = 30
 MAX_CLIPBOARD_TIMEOUT = 3600
 

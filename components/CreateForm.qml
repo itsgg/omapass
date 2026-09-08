@@ -16,6 +16,10 @@ ColumnLayout {
   property string vault: ""
   property bool busy: false
   property bool vaultsLoading: false
+  // Set while editing an existing item, which changes the wording and stops
+  // the category chooser: an item's category cannot be changed after the fact.
+  property string editingId: ""
+  readonly property bool editing: editingId.length > 0
 
   signal vaultsRequested()
   property string submitError: ""
@@ -39,6 +43,14 @@ ColumnLayout {
     root.category = id
     root.reset(keepTitle)
     Qt.callLater(function() { root.focusFirst() })
+  }
+
+  // Fills the form from an existing item.
+  function loadValues(values) {
+    root.values = values
+    root.errors = ({})
+    root.generatePassword = false
+    root.submitError = ""
   }
 
   function reset(title) {
@@ -142,6 +154,7 @@ ColumnLayout {
       // Category chooser. Which kind of item this is changes the whole form,
       // so it comes first and reads as a choice rather than a setting.
       RowLayout {
+        visible: !root.editing
         Layout.fillWidth: true
         spacing: Style.space(4)
 
@@ -219,9 +232,11 @@ ColumnLayout {
       }
 
       // Vault picker. Which vault a credential lands in is worth deciding
-      // explicitly, so this is always shown: hiding it when the list could not
-      // be fetched left the user with no picker and no reason why.
+      // explicitly, so this is always shown when creating: hiding it when the
+      // list could not be fetched left the user with no picker and no reason
+      // why. Editing cannot move an item between vaults, so it is not offered.
       ColumnLayout {
+        visible: !root.editing
         Layout.fillWidth: true
         spacing: Style.space(3)
 
@@ -335,7 +350,9 @@ ColumnLayout {
     }
 
     Button {
-      text: root.busy ? "Saving..." : ("Create " + root.spec.label.toLowerCase())
+      text: root.busy
+        ? "Saving..."
+        : (root.editing ? "Save changes" : ("Create " + root.spec.label.toLowerCase()))
       iconText: "\u{f0306}"
       accent: root.theme.accent
       selected: true

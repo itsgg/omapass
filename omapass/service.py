@@ -1341,6 +1341,199 @@ class OmaPassService:
             dry_run=dry_run,
         )
 
+    def _raw_item(self, item_id: str) -> Tuple[bool, Any]:
+        """op's own full JSON for an item, unparsed and unnarrowed.
+
+        The edit path must never rebuild an item from our field model: that
+        model deliberately narrows an item to a few named fields, and writing
+        it back would silently drop sections, custom fields and anything we do
+        not model. Editing op's own representation in place is what makes the
+        round trip lossless.
+        """
+        try:
+            res = subprocess.run(
+                ["op", "item", "get", item_id, "--format=json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=15.0,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "Reading the item timed out"
+        except Exception as e:
+            return False, str(e)
+
+        if res.returncode != 0:
+            self._note_op_error(res.stderr)
+            return False, res.stderr.strip() or "Could not read the item"
+        try:
+            return True, json.loads(res.stdout)
+        except Exception:
+            return False, "Could not read the item"
+
+    @staticmethod
+    def _has_passkey(raw: Dict[str, Any]) -> bool:
+        """True if the item carries a passkey.
+
+        op documents that a JSON template does not support passkeys and that
+        editing such an item through one overwrites it. There is no safe way
+        to do this edit, so it is refused rather than attempted.
+        """
+        if str(raw.get("category", "")).upper() == "PASSKEY":
+            return True
+        for f in raw.get("fields", []) or []:
+            if not isinstance(f, dict):
+                continue
+            if str(f.get("type", "")).upper() == "PASSKEY":
+                return True
+            if "passkey" in str(f.get("id", "")).lower():
+                return True
+        return False
+
+    def edit_item(
+        self,
+        item_id: str = "",
+        changes: Optional[Dict[str, Any]] = None,
+        title: str = "",
+        url: str = "",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Edits named fields of an item, preserving everything it does not touch."""
+        if not self.check_op_installed():
+            return {"ok": False, "error": "op CLI not installed"}
+        if not item_id:
+            return {"ok": False, "error": "No item id provided"}
+
+        with self.lock:
+            epoch = self.lock_epoch
+
+        ok, raw = self._raw_item(item_id)
+        if not ok:
+            return {"ok": False, "error": str(raw)}
+
+        if self._has_passkey(raw):
+            return {
+                "ok": False,
+                "error": "This item has a passkey. Editing it here would destroy it; "
+                         "use the 1Password app.",
+            }
+
+        edits = dict(changes or {})
+        normalized_url = fields.normalize_url(url) if url else None
+        if url and not normalized_url:
+            return {"ok": False, "error": "Refusing to store a non-web URL"}
+
+        touched = []
+        if title.strip() and title.strip() != raw.get("title", ""):
+            raw["title"] = title.strip()
+            touched.append("title")
+
+        # Only the fields the user actually changed are written; every other
+        # key in op's payload is carried through untouched.
+        existing = {str(f.get("id", "")): f for f in raw.get("fields", []) or []
+                    if isinstance(f, dict)}
+        for field_id, value in edits.items():
+            new_value = "" if value is None else str(value)
+            entry = existing.get(field_id)
+            if entry is None:
+                continue
+            if str(entry.get("value", "")) == new_value:
+                continue
+            entry["value"] = new_value
+            touched.append(field_id)
+
+        if normalized_url:
+            urls = raw.get("urls") or []
+            primary = next((u for u in urls if isinstance(u, dict) and u.get("primary")), None)
+            if primary is None and urls:
+                primary = urls[0]
+            if primary is None:
+                raw["urls"] = [{"label": "website", "primary": True, "href": normalized_url}]
+                touched.append("url")
+            elif primary.get("href") != normalized_url:
+                primary["href"] = normalized_url
+                touched.append("url")
+
+        if not touched:
+            return {"ok": True, "unchanged": True, "id": item_id}
+
+        template_path = runtime_dir() / f"omapass-edit.{os.getpid()}.json"
+        try:
+            write_private(template_path, json.dumps(raw))
+            cmd = ["op", "item", "edit", item_id, f"--template={template_path}", "--format=json"]
+            if dry_run:
+                cmd.append("--dry-run")
+            try:
+                res = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=30.0,
+                )
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "error": "Saving the item timed out"}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+        finally:
+            try:
+                template_path.unlink()
+            except OSError:
+                pass
+
+        if res.returncode != 0:
+            self._note_op_error(res.stderr)
+            return {"ok": False, "error": res.stderr.strip() or "Failed to save the item"}
+
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return {"ok": False, "error": "Vault was locked during this request"}
+            # The cached copy is now wrong.
+            self.item_details_cache.pop(item_id, None)
+
+        self._note_op_success(epoch)
+        if not dry_run:
+            threading.Thread(target=self.sync, daemon=True).start()
+        return {"ok": True, "id": item_id, "changed": touched, "dryRun": dry_run}
+
+    def delete_item(self, item_id: str = "", archive: bool = True) -> Dict[str, Any]:
+        """Archives an item, or deletes it outright when explicitly asked.
+
+        Archiving is the default because it is recoverable: an item removed by
+        a misclick should be somewhere the user can get it back from.
+        """
+        if not self.check_op_installed():
+            return {"ok": False, "error": "op CLI not installed"}
+        if not item_id:
+            return {"ok": False, "error": "No item id provided"}
+
+        with self.lock:
+            epoch = self.lock_epoch
+
+        cmd = ["op", "item", "delete", item_id]
+        if archive:
+            cmd.append("--archive")
+
+        try:
+            res = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=20.0,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Removing the item timed out"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        if res.returncode != 0:
+            self._note_op_error(res.stderr)
+            return {"ok": False, "error": res.stderr.strip() or "Failed to remove the item"}
+
+        with self.lock:
+            if epoch != self.lock_epoch:
+                return {"ok": False, "error": "Vault was locked during this request"}
+            self.item_details_cache.pop(item_id, None)
+            self.items = [i for i in self.items if i.get("id") != item_id]
+            self._save_cache()
+
+        self._note_op_success(epoch)
+        threading.Thread(target=self.sync, daemon=True).start()
+        return {"ok": True, "id": item_id, "archived": archive}
+
     def open_desktop(self, item_id: str) -> Dict[str, Any]:
         """Opens item in 1Password desktop app via onepassword URI."""
         uri = f"onepassword://item?i={item_id}"
@@ -1432,6 +1625,21 @@ class OmaPassService:
                 password_recipe=str(request.get("recipe", DEFAULT_PASSWORD_RECIPE)),
                 password=str(request.get("password", "")),
                 dry_run=bool(request.get("dryRun", False)),
+            )
+        elif action == "edit_item":
+            return self.edit_item(
+                item_id=str(request.get("id", "")),
+                changes=request.get("changes") or {},
+                title=str(request.get("title", "")),
+                url=str(request.get("url", "")),
+                dry_run=bool(request.get("dryRun", False)),
+            )
+        elif action == "delete_item":
+            return self.delete_item(
+                item_id=str(request.get("id", "")),
+                # Archiving unless the caller is explicit, so a missing flag
+                # can never mean permanent deletion.
+                archive=bool(request.get("archive", True)),
             )
         elif action == "open_desktop":
             item_id = request.get("id", "")

@@ -56,8 +56,21 @@ which is tmpfs, deleted as soon as the command returns. That is far better than
 a command line, which every process on the machine can read, but it is not
 nothing. Generated is the default for that reason.
 
-Editing and deleting go through the 1Password app, which the details view can
-open for the item you are looking at.
+## Editing and removing
+
+From an item's details: **e** or the pencil to edit, **Del** or the bin to move
+it to the 1Password archive. Archiving is what the bin does, not deleting: it
+is recoverable from the app, and it asks first with **Keep** as the default.
+
+The edit form shows the same fields the create form does, but the save is
+lossless. It reads op's own JSON for the item, changes only the fields you
+touched, and writes that back, so sections, custom fields and anything this
+plugin does not model survive untouched.
+
+One thing it refuses: an item carrying a passkey. 1Password's own
+documentation states that editing such an item through a JSON template
+overwrites the passkey, so OmaPass declines and points you at the app rather
+than destroying a credential.
 
 ## Keyboard
 
