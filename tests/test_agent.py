@@ -214,19 +214,19 @@ class TestOmaPassService(IsolatedRuntimeDir):
         with patch.object(self.service, "check_op_installed", return_value=True):
             res = self.service.get_item("t1")
 
-        # The caller is given the code once, for the first render.
-        self.assertEqual(res["item"]["totp"], "123456")
-        # It is not retained...
-        self.assertEqual(self.service.item_details_cache["t1"]["data"]["totp"], "")
-        # ...but the fact that this item has one is, or reopening it within the
-        # cache window would hide the TOTP banner and never refresh it.
-        self.assertTrue(res["item"]["hasTotp"])
-        self.assertTrue(self.service.item_details_cache["t1"]["data"]["hasTotp"])
+            # The caller is given the code once, for the first render.
+            self.assertEqual(res["item"]["totp"], "123456")
+            # It is not retained...
+            self.assertEqual(self.service.item_details_cache["t1"]["data"]["totp"], "")
+            # ...but the fact that this item has one is, or reopening it within
+            # the cache window would hide the banner and never refresh it.
+            self.assertTrue(res["item"]["hasTotp"])
+            self.assertTrue(self.service.item_details_cache["t1"]["data"]["hasTotp"])
 
-        # A cache hit still advertises the TOTP, with no code attached.
-        again = self.service.get_item("t1")
-        self.assertTrue(again["item"]["hasTotp"])
-        self.assertEqual(again["item"]["totp"], "")
+            # A cache hit still advertises the TOTP, with no code attached.
+            again = self.service.get_item("t1")
+            self.assertTrue(again["item"]["hasTotp"])
+            self.assertEqual(again["item"]["totp"], "")
 
     @patch("subprocess.run")
     def test_item_without_totp_is_not_marked_as_having_one(self, mock_run):
