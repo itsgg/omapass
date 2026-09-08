@@ -15,12 +15,27 @@ BarWidget {
   property bool popupOpen: false
   function close() {
     popupOpen = false
+    // Drop the decrypted item as soon as the popup goes away; there is no
+    // reason for a plaintext password to outlive the view showing it.
+    forgetDetails()
   }
   function open() {
     root.currentView = "list"
     popupOpen = true
     checkStatus()
     refreshItems()
+  }
+
+  function forgetDetails() {
+    itemDetailsProc.pendingItem = null
+    root.itemDetails = null
+    root.selectedItem = null
+    root.detailsError = ""
+    root.loadingDetails = false
+    root.freshTotp = ""
+    root.totpExpiresAt = 0
+    root.detailIndex = 0
+    root.detailRevealed = false
   }
   function toggle() { popupOpen ? close() : open() }
   readonly property bool opened: popupOpen
@@ -29,13 +44,200 @@ BarWidget {
   readonly property int clipboardTimeout: setting("clipboardTimeout", 30)
   readonly property string defaultAction: setting("defaultAction", "password")
 
+  // The highlighted item and the actions its category actually supports. The
+  // footer hint is built from these, so the keys it advertises are the keys
+  // that will work on this row.
+  readonly property var currentItem: (root.selectedIndex >= 0 && root.selectedIndex < root.items.length)
+    ? root.items[root.selectedIndex]
+    : null
+  readonly property var currentFields: Model.quickFieldsFor(root.currentItem)
+
+  // The field the primary action copies. `defaultAction` only applies where
+  // the item actually has that field, so a card is never asked for a TOTP.
+  function primaryFieldFor(item) {
+    var f = Model.quickFieldsFor(item)
+    var wanted = root.defaultAction
+    if (wanted && (wanted === f.identity || wanted === f.extra)) return wanted
+    return f.primary
+  }
+
+  // The row's buttons in the same order the keyboard uses: the primary action
+  // first, so the leftmost button and Shift+Enter never disagree.
+  function quickFieldsOrdered(item) {
+    var list = Model.quickFieldList(item)
+    var primary = root.primaryFieldFor(item)
+    var out = [primary]
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] !== primary) out.push(list[i])
+    }
+    return out
+  }
+
+  // ---------------------------------------------------------------- Details navigation
+  //
+  // The details view had no keyboard at all: it could be entered with Enter
+  // and left with nothing. `detailIndex` walks the same field cards the mouse
+  // hovers, so every action there has a key.
+  property int detailIndex: 0
+
+  // The helper lifts notes out of `fields` into its own key, so keyboard
+  // navigation skipped them entirely: on a notes-only item every copy key did
+  // nothing. Appended here as a real field so the keyboard reaches it.
+  readonly property var detailFields: {
+    var out = (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields.slice() : []
+    if (root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0) {
+      out.push({ id: "notes", label: "notes", value: root.itemDetails.notes,
+                 type: "STRING", purpose: "NOTES", concealed: false })
+    }
+    return out
+  }
+
+  readonly property var focusedDetailField: (root.detailIndex >= 0 && root.detailIndex < root.detailFields.length)
+    ? root.detailFields[root.detailIndex]
+    : null
+
+  // True when the keyboard focus is on the notes entry appended above.
+  readonly property bool notesFocused: {
+    var f = root.focusedDetailField
+    return !!(f && f.id === "notes" && f.purpose === "NOTES")
+  }
+
+  function moveDetailField(delta) {
+    var n = root.detailFields.length
+    if (n === 0) return
+    root.detailIndex = ((root.detailIndex + delta) % n + n) % n
+  }
+
+  // Called by a field card when it takes focus. Without this, Down or End on
+  // an item with many fields selects a card that is scrolled out of sight and
+  // Enter copies something the user cannot see.
+  function ensureDetailVisible(y, h) {
+    if (!detailsFlick.visible || detailsFlick.height <= 0) return
+    var top = detailsFlick.contentY
+    var bottom = top + detailsFlick.height
+    if (y < top) detailsFlick.contentY = Math.max(0, y)
+    else if (y + h > bottom) {
+      var maxY = Math.max(0, detailsFlick.contentHeight - detailsFlick.height)
+      detailsFlick.contentY = Math.min(maxY, y + h - detailsFlick.height)
+    }
+  }
+
+  function copyFocusedDetailField() {
+    var f = root.focusedDetailField
+    if (!f) return
+    root.copyDetailField(f.id, Model.fieldDisplayName(f))
+  }
+
+  function revealFocusedDetailField() {
+    if (root.focusedDetailField) root.detailRevealed = !root.detailRevealed
+  }
+
+  function typeFocusedDetailField() {
+    var f = root.focusedDetailField
+    if (f) root.typeDetailField(f.id, Model.fieldDisplayName(f))
+  }
+
+  // Reveal is per focused field rather than per card: it resets as soon as the
+  // focus moves, so a password cannot be left uncovered by accident.
+  property bool detailRevealed: false
+  onDetailIndexChanged: root.detailRevealed = false
+
+  // ---------------------------------------------------------------- List navigation
+  function selectIndex(i) {
+    if (root.items.length === 0) return
+    var n = root.items.length
+    root.selectedIndex = Math.max(0, Math.min(i, n - 1))
+    itemList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+  }
+
+  // Wraps, because a list you can only walk off the end of is worse than one
+  // that comes back round.
+  function moveSelection(delta) {
+    if (root.items.length === 0) return
+    var n = root.items.length
+    root.selectedIndex = ((root.selectedIndex + delta) % n + n) % n
+    itemList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+  }
+
+  function pageSize() {
+    var rows = Math.floor(itemList.height / Math.max(1, Style.space(48) + Style.space(2)))
+    return Math.max(1, rows - 1)
+  }
+
+  function cycleCategory(delta) {
+    var cats = Model.CATEGORIES
+    var at = 0
+    for (var i = 0; i < cats.length; i++) {
+      if (cats[i].id === root.selectedCategory) { at = i; break }
+    }
+    root.selectedCategory = cats[((at + delta) % cats.length + cats.length) % cats.length].id
+  }
+
+  function activateCurrent() {
+    if (!root.currentItem) return
+    root.showItemDetails(root.currentItem)
+  }
+
+  function copyPrimary() {
+    var it = root.currentItem
+    if (!it) return
+    root.copyField(it.id, root.primaryFieldFor(it), it.title)
+  }
+
+  function copyExtra() {
+    var it = root.currentItem
+    if (!it) return
+    var f = root.currentFields
+    if (!f.extra) {
+      root.showToast("No " + "second factor" + " on this item")
+      return
+    }
+    root.copyField(it.id, f.extra, it.title)
+  }
+
+  function openCurrentUrl() {
+    var it = root.currentItem
+    if (!it || !it.url) {
+      root.showToast("This item has no website")
+      return
+    }
+    root.openUrl(it.url)
+  }
+
+  // Emacs/readline chords, matching the ones this machine adds to every other
+  // Omarchy popup: N/P step the list, F descends, B goes back, M is Enter and
+  // Ctrl+[ is Escape. Returns true when the chord was consumed.
+  function handleReadlineChord(event, inDetails) {
+    if (!(event.modifiers & Qt.ControlModifier)) return false
+    switch (event.key) {
+    case Qt.Key_N: inDetails ? root.moveDetailField(1) : root.moveSelection(1); return true
+    case Qt.Key_P: inDetails ? root.moveDetailField(-1) : root.moveSelection(-1); return true
+    case Qt.Key_F: inDetails ? root.copyFocusedDetailField() : root.activateCurrent(); return true
+    case Qt.Key_B: inDetails ? root.backToList() : root.close(); return true
+    case Qt.Key_M: inDetails ? root.copyFocusedDetailField() : root.activateCurrent(); return true
+    case Qt.Key_BracketLeft: inDetails ? root.backToList() : root.close(); return true
+    }
+    return false
+  }
+
+  readonly property string listHint: {
+    if (root.items.length === 0) return ""
+    var f = root.currentFields
+    var parts = ["\u21b5 Details"]
+    var primary = root.primaryFieldFor(root.currentItem)
+    if (primary) parts.push("\u21e7\u21b5 " + Model.fieldLabelFor(primary))
+    if (f.extra && f.extra !== primary) parts.push("\u2303\u21b5 " + Model.fieldLabelFor(f.extra))
+    if (root.currentItem && root.currentItem.url) parts.push("\u2325\u21b5 Website")
+    return parts.join("   ")
+  }
+
   // Vault state
   property bool installed: true
   property bool unlocked: false
   property string account: ""
   property int itemCount: 0
   property bool busy: false
-  property string lastRunAction: ""
+  property bool searching: false
 
   // View state: "list" or "details"
   property string currentView: "list"
@@ -51,11 +253,12 @@ BarWidget {
   property int selectedIndex: 0
   property var items: []
 
-  // Absolute path to helper script
-  readonly property string helperPath: Qt.resolvedUrl("omapass-agent.py").toString().replace(/^file:\/\//, "")
+  // Absolute path to helper script. resolvedUrl percent-encodes, so a plugin
+  // directory containing a space would otherwise yield an unusable path.
+  readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("omapass-agent.py").toString().replace(/^file:\/\//, ""))
 
   readonly property color colForeground: bar ? bar.foreground : Color.foreground
-  readonly property color colDim: bar ? Qt.darker(bar.foreground, 1.45) : Color.dim
+  readonly property color colDim: bar ? Qt.darker(bar.foreground, 1.45) : Color.muted
   readonly property color colAccent: Color.accent
   readonly property color colSurface: Color.popups.background
   readonly property color colBorder: Color.popups.border
@@ -63,6 +266,42 @@ BarWidget {
 
   Component.onCompleted: {
     checkStatus()
+  }
+
+  // Lets the popup be bound to a key, which is the point of a launcher:
+  //   omarchy-shell gg.omapass toggle
+  //   omarchy-shell gg.omapass search github
+  IpcHandler {
+    target: "gg.omapass"
+
+    function open(): void { root.broadcast("openFromIpc") }
+    function close(): void { root.broadcast("close") }
+    function toggle(): void { root.broadcast("toggleFromIpc") }
+    function sync(): void { root.broadcast("syncVault") }
+    function lock(): void { root.broadcast("lockVault") }
+
+    function search(query: string): void {
+      root.pendingQuery = query || ""
+      root.broadcast("openFromIpc")
+    }
+  }
+
+  // Set by the search IPC just before opening, and consumed on open so the
+  // popup comes up with the query already applied.
+  property string pendingQuery: ""
+
+  function openFromIpc() {
+    root.open()
+    if (root.pendingQuery !== "") {
+      root.searchQuery = root.pendingQuery
+      searchInput.text = root.pendingQuery
+      root.pendingQuery = ""
+    }
+  }
+
+  function toggleFromIpc() {
+    if (root.popupOpen) root.close()
+    else root.openFromIpc()
   }
 
   // Toast feedback timer
@@ -78,15 +317,37 @@ BarWidget {
     toastTimer.restart()
   }
 
-  // Status check process
+  // Builds the argv for one helper request.
+  //
+  // The payload goes to the helper on stdin ("request -"), never as an
+  // argument: /proc/<pid>/cmdline is readable by every process on the machine,
+  // so a copied credential in argv is a credential published to the machine.
+  function helperCommand(payload) {
+    return ["python3", root.helperPath, "request", "-"]
+  }
+
+  // Starts a helper request, handing the JSON to the child on stdin and then
+  // closing it so the child's read() sees EOF.
+  function runHelper(proc, payload) {
+    proc.command = root.helperCommand(payload)
+    proc.stdinEnabled = true
+    proc.running = true
+    proc.write(JSON.stringify(payload))
+    proc.stdinEnabled = false
+  }
+
+  // Status check process.
+  //
+  // `force` is what makes the helper actually ask 1Password, which is also
+  // what triggers the desktop app's authorization prompt. Unforced checks are
+  // answered from the helper's cache and never prompt, so the widget can poll
+  // freely; only the unlock flow forces.
   Process {
     id: statusProc
     running: false
-    command: ["python3", root.helperPath, "request", JSON.stringify({ action: "status" })]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.busy = false
         try {
           var resp = JSON.parse(text)
           root.installed = resp.installed !== false
@@ -96,26 +357,36 @@ BarWidget {
           if (resp.itemCount !== undefined) root.itemCount = resp.itemCount
           if (!wasUnlocked && root.unlocked) {
             root.refreshItems()
+            // The helper answers a forced status as soon as it knows the vault
+            // is open, and syncs the item list in the background. Refreshing
+            // once here can land before that sync finishes and leave the user
+            // looking at "No items in vault" until they touch something.
+            syncSettleTimer.attempts = 0
+            syncSettleTimer.restart()
           }
         } catch (e) {}
       }
     }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.showToast("Helper failed (exit " + exitCode + ")")
+    }
   }
 
-  function checkStatus() {
-    if (!statusProc.running) {
-      statusProc.running = true
-    }
+  function checkStatus(force) {
+    if (statusProc.running) return
+    root.runHelper(statusProc, { action: "status", force: !!force })
   }
 
   // Items search process
   Process {
     id: searchProc
     running: false
+    // Set when a query arrives while a search is already in flight, so the
+    // last keystroke is never the one that gets dropped.
+    property bool pending: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.busy = false
         try {
           var resp = JSON.parse(text)
           if (resp.ok && resp.items) {
@@ -124,42 +395,79 @@ BarWidget {
             if (root.selectedIndex >= root.items.length) {
               root.selectedIndex = Math.max(0, root.items.length - 1)
             }
+          } else if (resp.error) {
+            root.showToast(resp.error)
           }
         } catch (e) {}
       }
     }
+    property int generation: 0
+    property bool exitSeen: false
+    function finish() {
+      root.searching = false
+      if (searchProc.pending) {
+        searchProc.pending = false
+        Qt.callLater(root.refreshItems)
+      }
+    }
+    onExited: {
+      searchProc.exitSeen = true
+      searchProc.finish()
+    }
+    onRunningChanged: {
+      if (searchProc.running) return
+      var gen = searchProc.generation
+      Qt.callLater(function() {
+        if (searchProc.generation !== gen) return
+        if (searchProc.exitSeen || !root.searching) return
+        searchProc.finish()
+      })
+    }
   }
 
   function refreshItems() {
-    if (searchProc.running) return
-    root.busy = true
-    searchProc.command = [
-      "python3",
-      root.helperPath,
-      "request",
-      JSON.stringify({
-        action: "list",
-        query: root.searchQuery,
-        category: root.selectedCategory,
-        limit: 80
-      })
-    ]
-    searchProc.running = true
+    if (searchProc.running) {
+      searchProc.pending = true
+      return
+    }
+    root.searching = true
+    searchProc.exitSeen = false
+    searchProc.generation++
+    root.runHelper(searchProc, {
+      action: "list",
+      query: root.searchQuery,
+      category: root.selectedCategory,
+      limit: 80
+    })
   }
 
   // Item details process
   Process {
     id: itemDetailsProc
     running: false
+    // The item this fetch was issued for, so a response that lands after the
+    // user closed or navigated away cannot be adopted.
+    property string requestedId: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.loadingDetails = false
+        // Closing the popup runs forgetDetails(); without this guard the
+        // in-flight response walks straight back in and repopulates the
+        // decrypted fields that cleanup just dropped.
+        var stillWanted = root.popupOpen
+          && root.currentView === "details"
+          && root.selectedItem
+          && root.selectedItem.id === itemDetailsProc.requestedId
+        if (!stillWanted) return
         try {
           var resp = JSON.parse(text)
           if (resp.ok && resp.item) {
             root.itemDetails = resp.item
             root.detailsError = ""
+            // The code in the item payload has an unknown amount of its window
+            // left, so fetch one whose expiry we actually know.
+            if (resp.item.totp) Qt.callLater(root.refreshTotp)
           } else {
             root.detailsError = resp.error || "Failed to retrieve item details"
           }
@@ -168,29 +476,184 @@ BarWidget {
         }
       }
     }
+    // Item requested while this fetch was still in flight, re-issued on exit
+    // so clicking a second item supersedes the first instead of being ignored.
+    property var pendingItem: null
+    property int generation: 0
+    property bool exitSeen: false
+    function finish(errorText) {
+      // A helper that never produced parseable output leaves the spinner up
+      // forever unless the exit is handled here.
+      root.loadingDetails = false
+      if (errorText && !root.itemDetails && !root.detailsError) {
+        root.detailsError = errorText
+      }
+      var next = itemDetailsProc.pendingItem
+      itemDetailsProc.pendingItem = null
+      // Only re-issue if the user is still waiting on that item. Without this
+      // check, going Back while a fetch was in flight yanked the view into
+      // details again when the old request finished.
+      // The gate is re-checked inside the callback, not just before it:
+      // Back, close or another selection can land between scheduling and
+      // running, and clearing pendingItem cannot cancel a captured value.
+      if (next) {
+        Qt.callLater(function() {
+          if (root.currentView !== "details" || !root.popupOpen) return
+          if (!root.selectedItem || root.selectedItem.id !== next.id) return
+          root.showItemDetails(next)
+        })
+      }
+    }
+    onExited: function(exitCode) {
+      itemDetailsProc.exitSeen = true
+      itemDetailsProc.finish(exitCode !== 0 ? "Helper failed (exit " + exitCode + ")" : "")
+    }
+    onRunningChanged: {
+      if (itemDetailsProc.running) return
+      var gen = itemDetailsProc.generation
+      Qt.callLater(function() {
+        if (itemDetailsProc.generation !== gen) return
+        if (itemDetailsProc.exitSeen || !root.loadingDetails) return
+        itemDetailsProc.finish("Could not start the helper (python3 missing?)")
+      })
+    }
   }
 
   function showItemDetails(item) {
     if (!item) return
+    if (itemDetailsProc.running) {
+      itemDetailsProc.pendingItem = item
+      root.selectedItem = item
+      root.itemDetails = null
+      root.freshTotp = ""
+      root.totpExpiresAt = 0
+      root.detailIndex = 0
+      root.detailRevealed = false
+      root.currentView = "details"
+      root.loadingDetails = true
+      return
+    }
     root.selectedItem = item
     root.itemDetails = null
     root.detailsError = ""
+    root.freshTotp = ""
+    root.totpExpiresAt = 0
+    // Reveal is consent for one field of one item. Carrying the index and the
+    // reveal flag into the next item would uncover a different credential the
+    // user never asked to see.
+    root.detailIndex = 0
+    root.detailRevealed = false
     root.loadingDetails = true
     root.currentView = "details"
 
-    itemDetailsProc.command = [
-      "python3",
-      root.helperPath,
-      "request",
-      JSON.stringify({
-        action: "get_item",
-        id: item.id
-      })
-    ]
-    itemDetailsProc.running = true
+    itemDetailsProc.exitSeen = false
+    itemDetailsProc.generation++
+    itemDetailsProc.requestedId = String(item.id)
+    root.runHelper(itemDetailsProc, { action: "get_item", id: item.id })
+  }
+
+  // Live TOTP.
+  //
+  // A code is only valid until the next 30s wall-clock boundary, so the banner
+  // refreshes on that boundary rather than on a free-running interval, and it
+  // says how long the displayed code has left instead of quietly going stale.
+  readonly property int totpPeriod: 30000
+  property string freshTotp: ""
+  property double totpExpiresAt: 0
+  property double totpNow: 0
+
+  readonly property string currentTotp: root.freshTotp !== ""
+    ? root.freshTotp
+    : ((root.itemDetails && root.itemDetails.totp) ? String(root.itemDetails.totp) : "")
+
+  readonly property int totpSecondsLeft: root.totpExpiresAt > 0
+    ? Math.max(0, Math.ceil((root.totpExpiresAt - root.totpNow) / 1000))
+    : 0
+  // Only claim expiry once we have actually anchored a code to a window.
+  // Keyed off currentTotp alone, the banner read "EXPIRED" for the whole gap
+  // between the item loading and the first live fetch returning.
+  readonly property bool totpStale: root.currentTotp !== ""
+    && root.totpExpiresAt > 0
+    && root.totpSecondsLeft <= 0
+
+  Process {
+    id: otpProc
+    running: false
+    // The item this request was issued for. A response that arrives after the
+    // user has moved on must not overwrite the code shown for another item.
+    property string requestedId: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var ok = false
+        try {
+          var resp = JSON.parse(text)
+          var stillCurrent = root.itemDetails && root.itemDetails.id === otpProc.requestedId
+          if (resp.ok && resp.otp && stillCurrent) {
+            root.freshTotp = String(resp.otp)
+            root.markTotpFetched()
+            ok = true
+          }
+        } catch (e) {}
+        // Without this a single transient failure froze the displayed code at
+        // "expired" until the item was reopened.
+        if (!ok) root.scheduleTotpRetry()
+      }
+    }
+  }
+
+  // A TOTP rolls at wall-clock multiples of its period, so the code we just
+  // received is good until the next boundary, not for a full period.
+  function markTotpFetched() {
+    var now = Date.now()
+    root.totpNow = now
+    root.totpExpiresAt = now + (root.totpPeriod - (now % root.totpPeriod))
+    totpTimer.interval = Math.max(1000, root.totpExpiresAt - now + 500)
+    totpTimer.restart()
+  }
+
+  // Try again on the next window boundary rather than giving up for good.
+  function scheduleTotpRetry() {
+    if (!root.itemDetails || !root.itemDetails.totp) return
+    var now = Date.now()
+    totpTimer.interval = Math.max(2000, root.totpPeriod - (now % root.totpPeriod) + 500)
+    totpTimer.restart()
+  }
+
+  function refreshTotp() {
+    if (otpProc.running) return
+    if (!root.itemDetails || !root.itemDetails.id) return
+    if (!root.itemDetails.totp) return
+    otpProc.requestedId = String(root.itemDetails.id)
+    root.runHelper(otpProc, { action: "otp", id: otpProc.requestedId })
+  }
+
+  // Fires once per code window, aligned to the boundary by markTotpFetched.
+  Timer {
+    id: totpTimer
+    interval: root.totpPeriod
+    repeat: false
+    running: false
+    onTriggered: root.refreshTotp()
+  }
+
+  // Drives the countdown, and is what makes an un-refreshable code visibly
+  // expire rather than sit there looking valid.
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.popupOpen
+      && root.currentView === "details"
+      && !!(root.itemDetails && root.itemDetails.totp)
+    onTriggered: root.totpNow = Date.now()
   }
 
   function backToList() {
+    itemDetailsProc.pendingItem = null
+    root.freshTotp = ""
+    root.totpExpiresAt = 0
+    root.detailIndex = 0
+    root.detailRevealed = false
     root.currentView = "list"
     root.selectedItem = null
     root.itemDetails = null
@@ -207,35 +670,94 @@ BarWidget {
     runAction({ action: "open_desktop", id: itemId })
   }
 
-  // Generic action runner
+  // Generic action runner.
+  //
+  // Actions are queued rather than dropped: a second click while a copy is in
+  // flight used to vanish with no feedback at all.
+  property var actionQueue: []
+  property var runningAction: null
+
   Process {
     id: actionProc
     running: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.busy = false
-        var completedAction = root.lastRunAction
-        root.lastRunAction = ""
-        checkStatus()
-        if (completedAction === "sync") {
-          root.refreshItems()
+        var job = root.runningAction
+        try {
+          var resp = JSON.parse(text)
+          if (resp.ok) {
+            if (job && job.successToast) root.showToast(job.successToast)
+          } else {
+            root.showToast(resp.error || "Action failed")
+            // op refuses when the vault relocked under us; reflect that.
+            root.checkStatus()
+          }
+        } catch (e) {
+          root.showToast("Could not read helper response")
         }
       }
     }
+    // Bumped on every start. The deferred launch-failure check below compares
+    // it so a stale callback can never finish a job that already moved on.
+    property int generation: 0
+    property bool exitSeen: false
+    onExited: function(exitCode) {
+      actionProc.exitSeen = true
+      root.finishAction(exitCode !== 0 ? "Helper failed (exit " + exitCode + ")" : "")
+    }
+    onRunningChanged: {
+      // Quickshell reports a process that failed to launch by clearing
+      // `running` without ever emitting `exited`. Without this the current
+      // action gets no feedback and the whole queue stalls behind it.
+      if (actionProc.running) return
+      var gen = actionProc.generation
+      var job = root.runningAction
+      if (!job) return
+      Qt.callLater(function() {
+        if (actionProc.generation !== gen) return
+        if (actionProc.exitSeen || root.runningAction !== job) return
+        root.finishAction("Could not start the helper (python3 missing?)")
+      })
+    }
   }
 
-  function runAction(payload) {
-    if (actionProc.running) return
+  function finishAction(errorText) {
+    var job = root.runningAction
+    if (!job) return
+    root.runningAction = null
+    root.busy = false
+    if (errorText) root.showToast(errorText)
+
+    var completed = job.payload.action
+    if (completed === "sync" || completed === "lock") {
+      root.refreshItems()
+    }
+    if (completed === "sync" || completed === "lock" || completed === "unlock") {
+      // Only the unlock path forces, since forcing is what prompts 1Password.
+      root.checkStatus(completed === "unlock")
+    }
+    // Deferred: restarting the Process from inside its own exit handler.
+    Qt.callLater(root.pumpActions)
+  }
+
+  function pumpActions() {
+    if (actionProc.running || root.actionQueue.length === 0) return
+    var queue = root.actionQueue
+    var job = queue.shift()
+    root.actionQueue = queue
+    root.runningAction = job
     root.busy = true
-    root.lastRunAction = payload.action || ""
-    actionProc.command = [
-      "python3",
-      root.helperPath,
-      "request",
-      JSON.stringify(payload)
-    ]
-    actionProc.running = true
+    actionProc.exitSeen = false
+    actionProc.generation++
+    root.runHelper(actionProc, job.payload)
+  }
+
+  function runAction(payload, successToast) {
+    var queue = root.actionQueue
+    queue.push({ payload: payload, successToast: successToast || "" })
+    root.actionQueue = queue
+    root.pumpActions()
   }
 
   function unlock() {
@@ -245,27 +767,50 @@ BarWidget {
   }
 
   function lockVault() {
-    runAction({ action: "lock" })
+    runAction({ action: "lock" }, "Vault locked and clipboard cleared")
     root.unlocked = false
     root.items = []
     root.currentView = "list"
+    root.forgetDetails()
   }
 
   function syncVault() {
-    runAction({ action: "sync" })
+    runAction({ action: "sync" }, "Vault synced")
+  }
+
+  function clearsIn() {
+    return root.clipboardTimeout > 0
+      ? " (clears in " + root.clipboardTimeout + "s)"
+      : ""
   }
 
   function copyField(itemId, field, title) {
+    var what = field || root.defaultAction
     runAction({
       action: "copy",
       id: itemId,
-      field: field || root.defaultAction,
+      field: what,
       title: title || "",
       timeout: root.clipboardTimeout
-    })
-    showToast("Copied " + (field || "password") + " (clears in " + root.clipboardTimeout + "s)")
+    }, "Copied " + what + root.clearsIn())
   }
 
+  // Copies a field of the open item by naming it, rather than handing its
+  // plaintext back to the helper. The helper already holds the decrypted item;
+  // round-tripping the secret through a subprocess only creates exposure.
+  function copyDetailField(fieldId, label) {
+    if (!root.itemDetails || !root.itemDetails.id) return
+    runAction({
+      action: "copy",
+      id: root.itemDetails.id,
+      field: fieldId,
+      title: root.itemDetails.title || "",
+      timeout: root.clipboardTimeout
+    }, "Copied " + (label || fieldId) + root.clearsIn())
+  }
+
+  // Values that are not secrets and have no field identity of their own (a
+  // website address the user can already read on screen).
   function copyRawValue(val, label, title) {
     if (!val) return
     runAction({
@@ -274,16 +819,15 @@ BarWidget {
       title: title || "",
       field: label || "",
       timeout: root.clipboardTimeout
-    })
-    showToast("Copied " + label + " (clears in " + root.clipboardTimeout + "s)")
+    }, "Copied " + (label || "value") + root.clearsIn())
   }
 
-  function typeFieldValue(val, label) {
-    if (!val) return
+  function typeDetailField(fieldId, label) {
+    if (!root.itemDetails || !root.itemDetails.id) return
     runAction({
       action: "type",
-      value: val,
-      field: label || ""
+      id: root.itemDetails.id,
+      field: fieldId
     })
     root.close()
   }
@@ -311,20 +855,42 @@ BarWidget {
     onTriggered: root.refreshItems()
   }
 
-  // Unlock polling timer — only runs temporarily after clicking Unlock until unlocked or 15s elapsed
+  // Re-checks the list for a short while after unlocking, because the first
+  // sync completes asynchronously and has no way to notify us.
+  Timer {
+    id: syncSettleTimer
+    interval: 1200
+    repeat: true
+    running: false
+    property int attempts: 0
+    onTriggered: {
+      attempts++
+      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 8) {
+        running = false
+        attempts = 0
+        return
+      }
+      root.refreshItems()
+    }
+  }
+
+  // Unlock polling timer: only runs temporarily after clicking Unlock until
+  // unlocked or ~16s elapsed. These checks must force: an unforced status is
+  // answered from the helper's "still locked" cache and could never observe
+  // the unlock that just happened.
   Timer {
     id: unlockPollTimer
-    interval: 1500
+    interval: 2000
     running: false
     repeat: true
     property int attempts: 0
     onTriggered: {
       attempts++
-      if (root.unlocked || attempts >= 10 || !root.popupOpen) {
+      if (root.unlocked || attempts >= 8 || !root.popupOpen) {
         running = false
         attempts = 0
       } else {
-        root.checkStatus()
+        root.checkStatus(true)
       }
     }
   }
@@ -341,10 +907,10 @@ BarWidget {
     active: root.unlocked
     horizontalMargin: 7.5
     tooltipText: !root.installed
-      ? "1Password — CLI (op) not found"
+      ? "1Password: CLI (op) not found"
       : root.unlocked
-        ? ("1Password — Unlocked" + (root.itemCount > 0 ? " (" + root.itemCount + " items)" : ""))
-        : "1Password — Locked (Click to open)"
+        ? ("1Password: Unlocked" + (root.itemCount > 0 ? " (" + root.itemCount + " items)" : ""))
+        : "1Password: Locked (Click to open)"
 
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton) {
@@ -357,16 +923,40 @@ BarWidget {
   }
 
   // ---------------------------------------------------------------- Popup Card
-  PopupCard {
+  // KeyboardPanel, not PopupCard.
+  //
+  // PopupCard is an xdg-popup on the bar's layer surface, and the bar sets
+  // keyboardFocus: None, so nothing anchored to it can ever receive a key.
+  // The search field could be clicked but never typed into, and every key
+  // handler in this file was dead code. KeyboardPanel is the same card on a
+  // layer surface that takes focus, which is what Omarchy's own typeable
+  // popups (menu, clipboard, wifi passphrase) use.
+  KeyboardPanel {
     id: popup
     anchorItem: button
     bar: root.bar
     owner: root
     open: root.popupOpen
+
+    // Qt needs an active-focus target inside the surface before any
+    // Keys handler fires, and it differs per view.
+    focusTarget: !root.unlocked
+      ? unlockBtn
+      : (root.currentView === "details" ? detailsViewArea : searchInput)
+
+    // KeyboardPanel only focuses focusTarget when the surface maps. Unlocking,
+    // locking or switching views swaps the target while the panel stays open,
+    // and without this the layer keeps keyboard focus while every handler sits
+    // on a hidden item.
+    onFocusTargetChanged: if (popup.open && popup.focusTarget) {
+      Qt.callLater(function() {
+        if (popup.open && popup.focusTarget) popup.focusTarget.forceActiveFocus()
+      })
+    }
     contentWidth: popup.fittedContentWidth(Style.space(480))
     contentHeight: root.unlocked
       ? popup.cappedContentHeight(Style.space(520))
-      : popup.fittedContentHeight(lockedColumn.implicitHeight + Style.space(48))
+      : popup.fittedContentHeight(popupContent.implicitHeight)
 
     onOpenChanged: {
       if (open) {
@@ -386,6 +976,7 @@ BarWidget {
     }
 
     ColumnLayout {
+      id: popupContent
       anchors.fill: parent
       spacing: Style.space(10)
 
@@ -426,8 +1017,10 @@ BarWidget {
         // Sync button
         Button {
           visible: root.unlocked
-          iconText: "󰑐"
-          tooltipText: "Sync vault"
+          // A vault sync is a network round trip; without this the button
+          // looks inert until the toast arrives seconds later.
+          iconText: root.busy ? "󰔟" : "󰑐"
+          tooltipText: root.busy ? "Working..." : "Sync vault"
           accent: root.colAccent
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(4)
@@ -548,7 +1141,21 @@ BarWidget {
         id: lockedColumn
         visible: !root.unlocked
         Layout.fillWidth: true
+        Layout.alignment: Qt.AlignHCenter
+        Layout.maximumWidth: parent ? parent.width : 0
         spacing: Style.space(14)
+
+        // Escape has to work here too. The search field owns dismissal in the
+        // list view and does not exist while locked, so opening the panel
+        // locked used to trap the keyboard until the mouse rescued it.
+        Keys.onEscapePressed: root.close()
+        Keys.onPressed: function(event) {
+          if ((event.modifiers & Qt.ControlModifier)
+              && (event.key === Qt.Key_BracketLeft || event.key === Qt.Key_B)) {
+            root.close()
+            event.accepted = true
+          }
+        }
 
         Item { Layout.preferredHeight: Style.space(8) }
 
@@ -575,20 +1182,26 @@ BarWidget {
           spacing: Style.space(4)
 
           Text {
-            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
             text: "1Password Vault Locked"
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             font.bold: true
             color: root.colForeground
+            elide: Text.ElideRight
           }
 
           Text {
-            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
             text: root.account ? root.account : "Unlock with fingerprint or master password"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
+            wrapMode: Text.Wrap
+            elide: Text.ElideRight
+            maximumLineCount: 2
           }
         }
 
@@ -662,6 +1275,37 @@ BarWidget {
                 visible: !searchInput.text && !searchInput.inputMethodComposing
               }
 
+              // Chords and navigation keys are taken before the input sees
+              // them; anything not claimed here still types normally.
+              Keys.onPressed: function(event) {
+                if (root.handleReadlineChord(event, false)) {
+                  event.accepted = true
+                  return
+                }
+                switch (event.key) {
+                case Qt.Key_Home:
+                  if (event.modifiers & Qt.ControlModifier) { root.selectIndex(0); event.accepted = true }
+                  break
+                case Qt.Key_End:
+                  if (event.modifiers & Qt.ControlModifier) { root.selectIndex(root.items.length - 1); event.accepted = true }
+                  break
+                case Qt.Key_PageDown:
+                  root.moveSelection(root.pageSize()); event.accepted = true
+                  break
+                case Qt.Key_PageUp:
+                  root.moveSelection(-root.pageSize()); event.accepted = true
+                  break
+                case Qt.Key_Tab:
+                  // Qt delivers Shift+Tab as Key_Tab with the modifier set on
+                  // some layouts and as Key_Backtab on others; handle both.
+                  root.cycleCategory((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+                  event.accepted = true
+                  break
+                case Qt.Key_Backtab:
+                  root.cycleCategory(-1); event.accepted = true
+                  break
+                }
+              }
               Keys.onEscapePressed: {
                 if (searchInput.text.length > 0) {
                   searchInput.text = ""
@@ -669,37 +1313,31 @@ BarWidget {
                   root.close()
                 }
               }
-              Keys.onDownPressed: {
-                if (root.items.length > 0) {
-                  root.selectedIndex = (root.selectedIndex + 1) % root.items.length
-                  itemList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+              Keys.onDownPressed: root.moveSelection(1)
+              Keys.onUpPressed: root.moveSelection(-1)
+              // Right only opens the item when it is not a text gesture: with
+              // a modifier, or with the caret mid-query, it belongs to the
+              // search field so selection and caret movement still work.
+              Keys.onRightPressed: function(event) {
+                var editing = (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+                  || searchInput.cursorPosition < searchInput.text.length
+                if (editing) {
+                  event.accepted = false
+                  return
                 }
-              }
-              Keys.onUpPressed: {
-                if (root.items.length > 0) {
-                  root.selectedIndex = (root.selectedIndex - 1 + root.items.length) % root.items.length
-                  itemList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
-                }
-              }
-              Keys.onRightPressed: {
-                if (root.items.length > 0 && root.selectedIndex >= 0 && root.selectedIndex < root.items.length) {
-                  root.showItemDetails(root.items[root.selectedIndex])
-                }
+                root.activateCurrent()
               }
               Keys.onReturnPressed: function(event) {
-                if (root.items.length === 0) return
-                var item = root.items[root.selectedIndex]
-                if (!item) return
-
-                if (event.modifiers & Qt.ShiftModifier) {
-                  root.copyField(item.id, "username", item.title)
-                } else if (event.modifiers & Qt.ControlModifier) {
-                  root.copyField(item.id, "otp", item.title)
-                } else if (event.modifiers & Qt.AltModifier) {
-                  root.openUrl(item.url)
-                } else {
-                  root.showItemDetails(item)
-                }
+                if (event.modifiers & Qt.ShiftModifier) root.copyPrimary()
+                else if (event.modifiers & Qt.ControlModifier) root.copyExtra()
+                else if (event.modifiers & Qt.AltModifier) root.openCurrentUrl()
+                else root.activateCurrent()
+              }
+              Keys.onEnterPressed: function(event) {
+                if (event.modifiers & Qt.ShiftModifier) root.copyPrimary()
+                else if (event.modifiers & Qt.ControlModifier) root.copyExtra()
+                else if (event.modifiers & Qt.AltModifier) root.openCurrentUrl()
+                else root.activateCurrent()
               }
             }
 
@@ -778,8 +1416,9 @@ BarWidget {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
+                  // onSelectedCategoryChanged already refreshes; calling it
+                  // here too fired two helper processes per chip click.
                   root.selectedCategory = modelData.id
-                  root.refreshItems()
                   searchInput.forceActiveFocus()
                 }
               }
@@ -794,6 +1433,10 @@ BarWidget {
 
           ListView {
             id: itemList
+            // Last pointer position in viewport coordinates, so hover can tell
+            // a moved mouse from a moved list.
+            property real lastHoverX: -1
+            property real lastHoverY: -1
             anchors.fill: parent
             clip: true
             visible: root.items.length > 0
@@ -819,7 +1462,20 @@ BarWidget {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onEntered: root.selectedIndex = index
+                // Hover selects only on real pointer movement. Qt emits
+                // positionChanged from hoverEnterEvent as well, so keyboard
+                // navigation scrolling a row under a stationary cursor would
+                // otherwise yank the selection back to whatever slid under it.
+                // Viewport coordinates are used because they do not change
+                // when the list scrolls beneath a still pointer.
+                onPositionChanged: function(mouse) {
+                  var p = mapToItem(itemList, mouse.x, mouse.y)
+                  if (Math.abs(p.x - itemList.lastHoverX) < 1
+                      && Math.abs(p.y - itemList.lastHoverY) < 1) return
+                  itemList.lastHoverX = p.x
+                  itemList.lastHoverY = p.y
+                  root.selectedIndex = index
+                }
                 onClicked: root.showItemDetails(modelData)
               }
 
@@ -873,87 +1529,53 @@ BarWidget {
                   }
                 }
 
-                // Quick Action Buttons
+                // Quick actions, derived from the item's category.
+                //
+                // A credit card has no password, username or TOTP, so a fixed
+                // set of buttons put three dead controls on every card row and
+                // every click returned "No username field on this item".
                 Row {
+                  id: quickActions
                   z: 10
                   spacing: Style.space(4)
                   visible: isSelected || itemMouse.containsMouse
 
-                  // Copy Password
-                  Rectangle {
-                    width: Style.space(26)
-                    height: Style.space(26)
-                    radius: Style.space(4)
-                    color: pwMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+                  readonly property var item: modelData
 
-                    Text {
-                      anchors.centerIn: parent
-                      text: "󰌆"
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      color: pwMouse.containsMouse ? Color.background : root.colForeground
-                    }
+                  Repeater {
+                    // Ordered by root.quickFieldsOrdered so the first button
+                    // and Shift+Enter always agree with `defaultAction`.
+                    model: root.quickFieldsOrdered(quickActions.item)
+                    delegate: Rectangle {
+                      required property string modelData
+                      readonly property string field: modelData
 
-                    MouseArea {
-                      id: pwMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.copyField(modelData.id, "password", modelData.title)
-                    }
-                  }
+                      width: Style.space(26)
+                      height: Style.space(26)
+                      radius: Style.space(4)
+                      color: fieldMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
 
-                  // Copy Username
-                  Rectangle {
-                    width: Style.space(26)
-                    height: Style.space(26)
-                    radius: Style.space(4)
-                    color: userMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
+                      Text {
+                        anchors.centerIn: parent
+                        text: Model.fieldIconFor(field)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        color: fieldMouse.containsMouse ? Color.background : root.colForeground
+                      }
 
-                    Text {
-                      anchors.centerIn: parent
-                      text: "󰋽"
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      color: userMouse.containsMouse ? Color.background : root.colForeground
-                    }
-
-                    MouseArea {
-                      id: userMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.copyField(modelData.id, "username", modelData.title)
-                    }
-                  }
-
-                  // Copy TOTP
-                  Rectangle {
-                    width: Style.space(26)
-                    height: Style.space(26)
-                    radius: Style.space(4)
-                    color: otpMouse.containsMouse ? root.colAccent : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.12)
-
-                    Text {
-                      anchors.centerIn: parent
-                      text: "󰄬"
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      color: otpMouse.containsMouse ? Color.background : root.colForeground
-                    }
-
-                    MouseArea {
-                      id: otpMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.copyField(modelData.id, "otp", modelData.title)
+                      MouseArea {
+                        id: fieldMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.copyField(quickActions.item.id, field, quickActions.item.title)
+                      }
                     }
                   }
 
                   // Open URL
                   Rectangle {
-                    visible: !!modelData.url
+                    visible: !!quickActions.item.url
                     width: Style.space(26)
                     height: Style.space(26)
                     radius: Style.space(4)
@@ -961,7 +1583,7 @@ BarWidget {
 
                     Text {
                       anchors.centerIn: parent
-                      text: "󰖟"
+                      text: "\u{f059f}"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       color: urlMouse.containsMouse ? Color.background : root.colForeground
@@ -972,7 +1594,7 @@ BarWidget {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.openUrl(modelData.url)
+                      onClicked: root.openUrl(quickActions.item.url)
                     }
                   }
 
@@ -985,7 +1607,7 @@ BarWidget {
 
                     Text {
                       anchors.centerIn: parent
-                      text: "󰅂"
+                      text: "\u{f0142}"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       color: detBtnMouse.containsMouse ? Color.background : root.colForeground
@@ -996,7 +1618,7 @@ BarWidget {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.showItemDetails(modelData)
+                      onClicked: root.showItemDetails(quickActions.item)
                     }
                   }
                 }
@@ -1012,22 +1634,22 @@ BarWidget {
 
             Text {
               Layout.alignment: Qt.AlignHCenter
-              text: root.busy ? "󰑐" : "󰍉"
+              text: root.searching ? "󰑐" : "󰍉"
               font.family: root.fontFamily
               font.pixelSize: Style.space(32)
-              color: root.busy ? root.colAccent : root.colDim
+              color: root.searching ? root.colAccent : root.colDim
             }
 
             Text {
               Layout.alignment: Qt.AlignHCenter
-              text: root.busy ? "Syncing vault..." : (root.searchQuery ? "No matching items found" : "No items in vault")
+              text: root.searching ? "Loading vault..." : (root.searchQuery ? "No matching items found" : "No items in vault")
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               color: root.colForeground
             }
 
             Text {
-              visible: !root.busy && root.searchQuery.length > 0
+              visible: !root.searching && root.searchQuery.length > 0
               Layout.alignment: Qt.AlignHCenter
               text: "Try a different search query or category"
               font.family: root.fontFamily
@@ -1051,10 +1673,13 @@ BarWidget {
 
           Text {
             Layout.fillWidth: true
-            text: "Click Details   ↵ Details   󰌆 Quick Copy   ⇧↵ Username   ⌃↵ TOTP"
+            // Elided, not merely fillWidth: without this the hint runs
+            // straight through the account label to its right.
+            text: root.listHint
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.colDim
+            elide: Text.ElideRight
           }
 
           Text {
@@ -1064,7 +1689,7 @@ BarWidget {
             font.pixelSize: Style.font.caption
             color: root.colDim
             elide: Text.ElideMiddle
-            Layout.maximumWidth: Style.space(160)
+            Layout.maximumWidth: Style.space(150)
           }
         }
       }
@@ -1075,6 +1700,36 @@ BarWidget {
         visible: root.unlocked && root.currentView === "details"
         Layout.fillWidth: true
         Layout.fillHeight: true
+
+        // The search field owns the keyboard in the list view and is hidden
+        // here, so without this the details view has no key handling at all.
+        focus: visible
+        Keys.onEscapePressed: root.backToList()
+        Keys.onLeftPressed: root.backToList()
+        Keys.onDownPressed: root.moveDetailField(1)
+        Keys.onUpPressed: root.moveDetailField(-1)
+        Keys.onReturnPressed: root.copyFocusedDetailField()
+        Keys.onEnterPressed: root.copyFocusedDetailField()
+        Keys.onPressed: function(event) {
+          if (root.handleReadlineChord(event, true)) {
+            event.accepted = true
+            return
+          }
+          switch (event.key) {
+          case Qt.Key_R: root.revealFocusedDetailField(); event.accepted = true; break
+          case Qt.Key_T: root.typeFocusedDetailField(); event.accepted = true; break
+          case Qt.Key_C: root.copyFocusedDetailField(); event.accepted = true; break
+          case Qt.Key_W:
+            if (root.itemDetails && root.itemDetails.urls && root.itemDetails.urls.length > 0) {
+              root.openUrl(root.itemDetails.urls[0].href)
+            }
+            event.accepted = true
+            break
+          case Qt.Key_Home: root.detailIndex = 0; event.accepted = true; break
+          case Qt.Key_End: root.detailIndex = Math.max(0, root.detailFields.length - 1); event.accepted = true; break
+          }
+        }
+        onVisibleChanged: if (visible) forceActiveFocus()
 
         // Loading Indicator (Pixel-Perfect Mathematical Centering)
         ColumnLayout {
@@ -1126,7 +1781,7 @@ BarWidget {
             text: "󰅙"
             font.family: root.fontFamily
             font.pixelSize: Style.space(34)
-            color: Color.negative || "#e06c75"
+            color: Color.urgent
           }
 
           Text {
@@ -1199,19 +1854,25 @@ BarWidget {
                   spacing: 1
 
                   Text {
-                    text: "ONE-TIME PASSWORD (TOTP)"
+                    text: root.totpStale
+                      ? "ONE-TIME PASSWORD (EXPIRED)"
+                      : (root.totpSecondsLeft > 0
+                        ? "ONE-TIME PASSWORD (TOTP), " + root.totpSecondsLeft + "s LEFT"
+                        : "ONE-TIME PASSWORD (TOTP)")
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption - 1
                     font.bold: true
-                    color: root.colAccent
+                    color: root.totpStale ? Color.urgent : root.colAccent
                   }
 
                   Text {
-                    text: (root.itemDetails && root.itemDetails.totp) ? root.itemDetails.totp : ""
+                    // Dimmed once the window has passed: a code that looks
+                    // crisp but no longer works is worse than one that says so.
+                    text: root.currentTotp
                     font.family: "JetBrainsMono Nerd Font, monospace"
                     font.pixelSize: Style.font.heading
                     font.bold: true
-                    color: root.colForeground
+                    color: root.totpStale ? root.colDim : root.colForeground
                   }
                 }
 
@@ -1222,9 +1883,10 @@ BarWidget {
                   horizontalPadding: Style.space(10)
                   verticalPadding: Style.space(4)
                   onClicked: {
-                    if (root.itemDetails && root.itemDetails.totp) {
-                      root.copyRawValue(root.itemDetails.totp, "TOTP", root.itemDetails.title)
-                    }
+                    // Fetched fresh rather than copying the displayed code:
+                    // by the time this is clicked that code may have rolled.
+                    var id = root.itemDetails ? root.itemDetails.id : ""
+                    if (id) root.copyField(id, "otp", root.itemDetails.title)
                   }
                 }
               }
@@ -1245,19 +1907,28 @@ BarWidget {
                 id: fieldCard
                 required property var modelData
                 required property int index
-                property bool revealed: false
+
+                // Keyboard focus and mouse hover paint the same state, and the
+                // reveal toggle follows the keyboard focus, so a revealed
+                // password re-conceals the moment focus moves off it.
+                readonly property bool focused: root.detailIndex === index
+                readonly property bool hot: focused || fieldHover.hovered
+                readonly property bool revealed: focused && root.detailRevealed
+
+                onFocusedChanged: if (focused) root.ensureDetailVisible(y, height)
 
                 // Strictly filter out any field with empty content
                 visible: !!(modelData && modelData.value && String(modelData.value).trim().length > 0)
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Style.space(52) : 0
                 radius: Style.cornerRadius
-                color: fieldHover.hovered
+                color: hot
                   ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
                   : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
-                borderSpec: Border.controlSpec(fieldHover.hovered ? "hover-cursor" : "normal", root.colForeground, root.colAccent)
+                borderSpec: Border.controlSpec(focused ? "focus" : (fieldHover.hovered ? "hover-cursor" : "normal"), root.colForeground, root.colAccent)
 
                 HoverHandler { id: fieldHover }
+                TapHandler { onTapped: root.detailIndex = fieldCard.index }
 
                 RowLayout {
                   anchors.fill: parent
@@ -1290,7 +1961,7 @@ BarWidget {
                       Layout.fillWidth: true
                       text: (modelData.concealed && !fieldCard.revealed)
                         ? Model.maskText(modelData.value)
-                        : (modelData.value || "")
+                        : Model.displayValue(modelData)
                       font.family: (modelData.concealed && !fieldCard.revealed)
                         ? root.fontFamily
                         : "JetBrainsMono Nerd Font, monospace"
@@ -1307,11 +1978,14 @@ BarWidget {
                     Button {
                       visible: !!modelData.concealed
                       iconText: fieldCard.revealed ? "󰈉" : "󰈈"
-                      tooltipText: fieldCard.revealed ? "Conceal" : "Reveal"
+                      tooltipText: fieldCard.revealed ? "Conceal (r)" : "Reveal (r)"
                       accent: root.colAccent
                       horizontalPadding: Style.space(6)
                       verticalPadding: Style.space(4)
-                      onClicked: fieldCard.revealed = !fieldCard.revealed
+                      onClicked: {
+                        root.detailIndex = fieldCard.index
+                        root.detailRevealed = !root.detailRevealed
+                      }
                     }
 
                     // Auto-type button
@@ -1322,7 +1996,7 @@ BarWidget {
                       accent: root.colAccent
                       horizontalPadding: Style.space(6)
                       verticalPadding: Style.space(4)
-                      onClicked: root.typeFieldValue(modelData.value, Model.fieldDisplayName(modelData))
+                      onClicked: root.typeDetailField(modelData.id, Model.fieldDisplayName(modelData))
                     }
 
                     // Copy button
@@ -1333,7 +2007,7 @@ BarWidget {
                       accent: root.colAccent
                       horizontalPadding: Style.space(6)
                       verticalPadding: Style.space(4)
-                      onClicked: root.copyRawValue(modelData.value, Model.fieldDisplayName(modelData), root.itemDetails.title)
+                      onClicked: root.copyDetailField(modelData.id, Model.fieldDisplayName(modelData))
                     }
                   }
                 }
@@ -1415,12 +2089,21 @@ BarWidget {
 
             // Notes Card
             BorderSurface {
+              id: notesCard
+              // Notes are the last entry in detailFields, so they take the
+              // focus ring like any other field rather than being a card the
+              // keyboard could act on but never highlight.
+              readonly property bool focused: root.notesFocused
+
               visible: !!(root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0)
               Layout.fillWidth: true
               Layout.preferredHeight: Math.min(Style.space(130), Math.max(Style.space(64), notesText.implicitHeight + Style.space(24)))
               radius: Style.cornerRadius
-              color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
-              borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+              color: focused
+                ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
+                : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+              borderSpec: Border.controlSpec(focused ? "focus" : "normal", root.colForeground, root.colAccent)
+              onFocusedChanged: if (focused) root.ensureDetailVisible(y, height)
 
               ColumnLayout {
                 anchors.fill: parent
@@ -1436,7 +2119,7 @@ BarWidget {
                     accent: root.colAccent
                     horizontalPadding: Style.space(6)
                     verticalPadding: Style.space(2)
-                    onClicked: root.copyRawValue(root.itemDetails.notes, "Notes", root.itemDetails.title)
+                    onClicked: root.copyDetailField("notes", "Notes")
                   }
                 }
 
@@ -1494,40 +2177,6 @@ BarWidget {
           }
         }
 
-        // Toast feedback pill
-        BorderSurface {
-          visible: root.statusToast.length > 0
-          Layout.fillWidth: true
-          Layout.preferredHeight: Style.space(28)
-          radius: Style.cornerRadius
-          color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
-          borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
-
-          RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: Style.space(10)
-            anchors.rightMargin: Style.space(10)
-            spacing: Style.space(6)
-
-            Text {
-              text: "󰄬"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              color: root.colAccent
-            }
-
-            Text {
-              Layout.fillWidth: true
-              text: root.statusToast
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              color: root.colForeground
-              elide: Text.ElideRight
-            }
-          }
-        }
-
         // Footer Separator
         Rectangle {
           Layout.fillWidth: true
@@ -1561,6 +2210,42 @@ BarWidget {
         }
       }
     }
+
+      // Toast feedback pill. Lives at the popup's root so a copy made from the
+      // list is confirmed too; nested in the details view it was invisible for
+      // every action taken on the list.
+      BorderSurface {
+        visible: root.statusToast.length > 0
+        Layout.fillWidth: true
+        Layout.preferredHeight: Style.space(28)
+        radius: Style.cornerRadius
+        color: Qt.rgba(root.colAccent.r, root.colAccent.g, root.colAccent.b, 0.18)
+        borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+
+        RowLayout {
+          anchors.fill: parent
+          anchors.leftMargin: Style.space(10)
+          anchors.rightMargin: Style.space(10)
+          spacing: Style.space(6)
+
+          Text {
+            text: "󰄬"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            color: root.colAccent
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: root.statusToast
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.colForeground
+            elide: Text.ElideRight
+          }
+        }
+      }
   }
 }
 }
