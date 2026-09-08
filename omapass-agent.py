@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 PLUGIN_ID = "gg.omapass"
@@ -67,6 +68,10 @@ AUTH_ERROR_MARKERS = (
 # final attempt, after which the user is warned rather than left unaware that a
 # credential is still on the clipboard.
 WIPE_RETRY_DELAYS = (0.5, 2.0, 5.0, 15.0, 0)
+
+# TOTP window in seconds when the item does not say otherwise. Most issuers
+# use 30, but the period is per-token and some use 60.
+DEFAULT_TOTP_PERIOD = 30
 
 # Schemes an item URL may be opened with. Everything else (file:, javascript:,
 # and friends) is refused rather than handed to xdg-open.
@@ -194,6 +199,30 @@ def cancel_previous_wipe() -> None:
                     wp.unlink()
             except OSError:
                 pass
+
+
+def totp_period_from_uri(uri: Any) -> int:
+    """Reads `period` out of an otpauth:// URI, in seconds.
+
+    The countdown is wrong for the whole life of the token if this is assumed:
+    a 60-second code shown with a 30-second timer looks expired while it is
+    still valid, and valid once it is not.
+    """
+    try:
+        text = str(uri or "")
+        if not text.lower().startswith("otpauth://"):
+            return DEFAULT_TOTP_PERIOD
+        values = urllib.parse.parse_qs(urllib.parse.urlparse(text).query).get("period")
+        if not values:
+            return DEFAULT_TOTP_PERIOD
+        period = int(values[0])
+        # Bounded: a nonsense period would make the countdown lie rather than
+        # simply be unknown.
+        if 5 <= period <= 300:
+            return period
+    except (ValueError, TypeError):
+        pass
+    return DEFAULT_TOTP_PERIOD
 
 
 def clear_clipboard_once(timeout: float = 3.0) -> bool:
@@ -1214,6 +1243,7 @@ class OmaPassService:
             notes_text = ""
             has_otp = False
             totp_code = ""
+            totp_period = DEFAULT_TOTP_PERIOD
 
             for f in raw.get("fields", []):
                 if not isinstance(f, dict):
@@ -1237,6 +1267,9 @@ class OmaPassService:
                     has_otp = True
                     if f.get("totp"):
                         totp_code = str(f.get("totp"))
+                    # The field's value is the otpauth:// URI, which carries
+                    # this token's own period.
+                    totp_period = totp_period_from_uri(fval)
 
                 # An OTP field's value is the otpauth:// URI, which embeds the
                 # long-lived shared secret: more sensitive than the password,
@@ -1299,6 +1332,7 @@ class OmaPassService:
                 # Survives caching, unlike the code itself, so the UI still
                 # knows to show the banner and fetch a live code on reopen.
                 "hasTotp": bool(has_otp or totp_code),
+                "totpPeriod": totp_period,
             }
 
             with self.lock:

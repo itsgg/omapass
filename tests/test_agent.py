@@ -228,6 +228,35 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.assertTrue(again["item"]["hasTotp"])
             self.assertEqual(again["item"]["totp"], "")
 
+    def test_totp_period_is_read_from_the_uri(self):
+        self.assertEqual(
+            agent.totp_period_from_uri("otpauth://totp/A?secret=S&period=60"), 60)
+        self.assertEqual(
+            agent.totp_period_from_uri("otpauth://totp/A?secret=S&issuer=X&period=15&digits=6"), 15)
+
+    def test_totp_period_falls_back_to_thirty(self):
+        for uri in [
+            "otpauth://totp/A?secret=S",          # no period given
+            "otpauth://totp/A?secret=S&period=0",  # nonsense
+            "otpauth://totp/A?secret=S&period=99999",
+            "otpauth://totp/A?secret=S&period=abc",
+            "not-a-uri", "", None,
+        ]:
+            self.assertEqual(agent.totp_period_from_uri(uri), 30, uri)
+
+    @patch("subprocess.run")
+    def test_item_reports_its_own_totp_period(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
+            "id": "p1", "title": "Slow", "category": "LOGIN",
+            "fields": [{"id": "totp", "type": "OTP", "purpose": "", "label": "one-time password",
+                        "value": "otpauth://totp/Slow?secret=S&period=60", "totp": "999000"}],
+        }))
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("p1")
+            self.assertEqual(res["item"]["totpPeriod"], 60)
+            # Survives caching, like hasTotp, so a reopen keeps the right timer.
+            self.assertEqual(self.service.get_item("p1")["item"]["totpPeriod"], 60)
+
     @patch("subprocess.run")
     def test_item_without_totp_is_not_marked_as_having_one(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({

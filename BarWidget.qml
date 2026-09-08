@@ -557,7 +557,12 @@ BarWidget {
   // A code is only valid until the next 30s wall-clock boundary, so the banner
   // refreshes on that boundary rather than on a free-running interval, and it
   // says how long the displayed code has left instead of quietly going stale.
-  readonly property int totpPeriod: 30000
+  // This token's own window, not an assumed 30 seconds: a 60-second code shown
+  // on a 30-second timer reads as expired while it is still good.
+  readonly property int totpPeriod: {
+    var seconds = root.itemDetails ? root.itemDetails.totpPeriod : 0
+    return (seconds && seconds > 0) ? seconds * 1000 : 30000
+  }
 
   // Whether the open item has a one-time password at all. `hasTotp` survives
   // the helper's cache, where the code itself deliberately does not; the
