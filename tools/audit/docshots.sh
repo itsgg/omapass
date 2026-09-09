@@ -1,5 +1,6 @@
 #!/bin/bash
-# Regenerates every screenshot the README shows, into docs/.
+# Regenerates every screenshot the README shows, into docs/, plus the
+# preview.png the marketplace looks for at the repository root.
 #
 # These drifted once: the details header gained an edit and an archive
 # button, the list header gained a create button, and the images kept
@@ -55,6 +56,17 @@ do
     exit 1
   }
   mv "$tmp" "$DOCS/$name.png"
+  # mktemp creates at 0600, and these are published assets, not secrets.
+  chmod 644 "$DOCS/$name.png"
+
+  # The marketplace looks for a preview at the repository root. Written from
+  # the same render rather than kept as a second file to remember, which is
+  # how the documentation images drifted in the first place.
+  if [ "$name" = "preview" ]; then
+    cp "$DOCS/$name.png" "$(dirname "$DOCS")/preview.png"
+    chmod 644 "$(dirname "$DOCS")/preview.png"
+    printf '  %s -> preview.png\n' "$state"
+  fi
   printf '  %s -> docs/%s.png (%s colours)\n' "$state" "$name" "$colours"
 done
 echo "docs screenshots regenerated"
