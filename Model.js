@@ -143,7 +143,17 @@ function fieldIconFor(field) { return fieldMeta(field).icon; }
 function formatExpiry(val) {
   var raw = String(val || "").replace(/\D/g, "");
   if (raw.length === 6) return raw.substring(4, 6) + "/" + raw.substring(0, 4);
-  if (raw.length === 4) return raw.substring(2, 4) + "/" + raw.substring(0, 2);
+  if (raw.length === 4) {
+    // Four digits are ambiguous: op stores a month and year as six, so these
+    // come from somewhere else and could be MMYY or YYMM. Whichever half is
+    // a real month decides it, and if both could be, the leading pair wins,
+    // because a person typing an expiry types the month first.
+    var lead = parseInt(raw.substring(0, 2), 10);
+    var tail = parseInt(raw.substring(2, 4), 10);
+    if (lead >= 1 && lead <= 12) return raw.substring(0, 2) + "/" + raw.substring(2, 4);
+    if (tail >= 1 && tail <= 12) return raw.substring(2, 4) + "/" + raw.substring(0, 2);
+    return String(val || "");
+  }
   return String(val || "");
 }
 
@@ -285,8 +295,10 @@ function validateCreate(spec, values) {
       errors[f.id] = "Enter a web address, or leave it blank";
     } else if (f.type === "EMAIL" && v.indexOf("@") < 1) {
       errors[f.id] = "That does not look like an email address";
-    } else if (f.type === "MONTH_YEAR" && !/^\d{4}[-/]?\d{2}$/.test(v)) {
-      errors[f.id] = "Use YYYYMM";
+    } else if (f.type === "MONTH_YEAR" && !/^\d{4}[-/]?(0[1-9]|1[0-2])$/.test(v)) {
+      // The month itself, not just its length: 202899 counted as valid here
+      // and was refused by op after the form had already been submitted.
+      errors[f.id] = "Use YYYYMM, with a month from 01 to 12";
     }
   }
   return errors;

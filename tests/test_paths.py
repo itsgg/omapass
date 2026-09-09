@@ -5,7 +5,7 @@ import pathlib
 import stat
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 from support import IsolatedRuntimeDir
 from omapass import paths
@@ -69,6 +69,27 @@ class TestWipeProcessIdentity(unittest.TestCase):
 
     def test_a_dead_pid_is_not_ours(self):
         self.assertFalse(paths.is_our_wipe_process(999999999))
+
+    def test_a_wipe_worker_is_recognised_only_by_shape(self):
+        """Asking whether the command line merely contains "omapass" and
+        "_wipe" also says yes to an editor with this file open, to a grep for
+        it, and to this suite run with `-k _wipe`, each of which would then
+        be sent a SIGTERM."""
+        entry = str(paths.entry_script())
+        name = os.path.basename(entry)
+        cases = {
+            ("/usr/bin/python3", entry, "_wipe", "30"): True,
+            ("/usr/bin/python3.14", "/elsewhere/" + name, "_wipe", "30"): True,
+            # The words are there; the shape is not.
+            ("/usr/bin/vim", entry, "_wipe"): False,
+            ("/usr/bin/grep", "-k", "_wipe", "omapass"): False,
+            ("/usr/bin/python3", entry, "serve"): False,
+            ("/usr/bin/python3", "unrelated.py", "_wipe"): False,
+        }
+        for argv, expected in cases.items():
+            blob = "\0".join(argv).encode()
+            with patch("builtins.open", mock_open(read_data=blob)):
+                self.assertEqual(paths.is_our_wipe_process(4242), expected, argv)
 
 
 class TestEntryScript(unittest.TestCase):

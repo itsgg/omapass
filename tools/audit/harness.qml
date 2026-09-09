@@ -278,6 +278,21 @@ ShellRoot {
       } else if (harness.state === "demo-search") {
         widget.searchQuery = "git"
         widget.items = [harness.demoItems[0]]
+      } else if (harness.state === "demo-create") {
+        widget.vaults = [{ id: "v1", name: "Personal" }, { id: "v2", name: "Work" }]
+        widget.startCreate("Fastmail")
+        widget.setCreateCategory("LOGIN")
+      } else if (harness.state === "demo-edit") {
+        widget.vaults = [{ id: "v1", name: "Personal" }]
+        widget.selectedItem = harness.demoItems[0]
+        widget.itemDetails = harness.demoDetails("demo-details")
+        widget.currentView = "details"
+        widget.startEdit()
+      } else if (harness.state === "demo-archive") {
+        widget.selectedItem = harness.demoItems[0]
+        widget.itemDetails = harness.demoDetails("demo-details")
+        widget.currentView = "details"
+        widget.askDelete()
       } else {
         widget.selectedItem = harness.demoItems[harness.state === "demo-card" ? 2 : 0]
         widget.itemDetails = harness.demoDetails(harness.state)

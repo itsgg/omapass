@@ -69,13 +69,24 @@ def is_our_wipe_process(pid: int) -> bool:
 
     Guards against PID reuse: without this a recycled pid means we SIGTERM an
     unrelated process of the user's.
+
+    Matched on shape, not on substrings. Asking whether the command line
+    merely contains "omapass" and "_wipe" also says yes to an editor with
+    this file open, to a grep for it, and to the test suite run with
+    `-k _wipe`, all of which would then be signalled.
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmdline = f.read().decode("utf-8", "replace")
+            argv = f.read().decode("utf-8", "replace").split("\0")
     except OSError:
         return False
-    return "omapass" in cmdline and "_wipe" in cmdline
+    if not argv or not pathlib.Path(argv[0]).name.startswith("python"):
+        return False
+    wanted = pathlib.Path(str(entry_script())).name
+    for i, arg in enumerate(argv[:-1]):
+        if arg and pathlib.Path(arg).name == wanted and argv[i + 1] == "_wipe":
+            return True
+    return False
 
 
 def socket_path() -> pathlib.Path:

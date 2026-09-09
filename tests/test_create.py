@@ -7,6 +7,7 @@ just on the result.
 
 import json
 import os
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -120,9 +121,11 @@ class TestCreateLogin(IsolatedRuntimeDir):
                     returncode=0, stdout=created, stderr="")):
                 with patch.object(self.service, "sync") as sync:
                     self.service.create_login(title="X")
-        # started on a thread; give it a moment to run
-        import time
-        time.sleep(0.2)
+                    # Waited on, not slept on: the sync runs on a thread, and
+                    # a fixed pause is a coin toss on a loaded CI runner.
+                    for thread in threading.enumerate():
+                        if thread is not threading.current_thread():
+                            thread.join(timeout=5.0)
         sync.assert_called()
 
     def test_a_typed_password_never_reaches_argv(self):
@@ -169,12 +172,26 @@ class TestCreateLogin(IsolatedRuntimeDir):
     def test_every_offered_category_can_be_created(self):
         for category in ("LOGIN", "PASSWORD", "CREDIT_CARD", "SECURE_NOTE"):
             with patch.object(self.service, "check_op_installed", return_value=True):
-                with patch("subprocess.run", return_value=MagicMock(
-                        returncode=0, stdout="{}", stderr="")) as run:
+                sent_template = {}
+
+                def run(cmd, *a, **k):
+                    for arg in cmd:
+                        if str(arg).startswith("--template="):
+                            path = str(arg).split("=", 1)[1]
+                            # Copied out before create_item unlinks it.
+                            with open(path) as fh:
+                                sent_template["body"] = fh.read()
+                            sent_template["path"] = path
+                    return MagicMock(returncode=0, stdout="{}", stderr="")
+
+                with patch("subprocess.run", side_effect=run):
                     with patch.object(self.service, "sync"):
                         res = self.service.create_item(category=category, title="X")
             self.assertTrue(res["ok"], category)
-            self.assertIn(category, " ".join(str(a) for a in run.call_args[0][0]) + category)
+            # The template, not the argv: op takes the category in the file,
+            # and the old assertion appended `category` to its own haystack,
+            # so it passed whatever was sent.
+            self.assertEqual(json.loads(sent_template["body"])["category"], category)
 
     def test_an_unknown_category_is_refused(self):
         with patch.object(self.service, "check_op_installed", return_value=True):

@@ -42,5 +42,7 @@ States: `locked`, `locked-long`, `locked-none`, `list`, `long`, `many`,
 `details-legacy`, `details-card`, `details-notes`, `details-many`,
 `details-error`, `details-loading`, `details-edit`, `details-edit-note`,
 `details-delete`, `create`, `create-card`, `create-note`, `create-empty`,
-the `demo-*` states used to render the screenshots in the README, and the
+the `demo-*` states used to render the screenshots in the README (including
+`demo-create`, `demo-edit` and `demo-archive`, cropped to 657x707 to match the
+others), and the
 `tab-order-*` states, which print a focus chain instead of an image.

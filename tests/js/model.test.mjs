@@ -278,3 +278,27 @@ test("submitText sends a title or website only when the edit changed it", () => 
   assert.equal(M.submitText(originals, {}, "title", false), "GitHub");
   assert.equal(M.submitText({}, {}, "title", false), "");
 });
+
+test("validateCreate checks the month itself, not just its length", () => {
+  const spec = M.createSpec("CREDIT_CARD");
+  const base = { title: "Card", ccnum: "4242424242424242", cvv: "123" };
+  // A month of 99 counted as valid and was refused by op after submitting.
+  for (const bad of ["202899", "202800", "202813", "2028/13"]) {
+    const errs = plain(M.validateCreate(spec, { ...base, expiry: bad }));
+    assert.ok(errs.expiry, `${bad} should be rejected`);
+  }
+  for (const good of ["202812", "2028/01", "2028-12", "202801"]) {
+    const errs = plain(M.validateCreate(spec, { ...base, expiry: good }));
+    assert.ok(!errs.expiry, `${good} should be accepted`);
+  }
+});
+
+test("formatExpiry resolves a four digit date by which half is a month", () => {
+  assert.equal(M.formatExpiry("202812"), "12/2028");
+  // Typed as MM/YY, which is how a person writes an expiry.
+  assert.equal(M.formatExpiry("1228"), "12/28");
+  // Stored as YYMM, where only the second half can be a month.
+  assert.equal(M.formatExpiry("2812"), "12/28");
+  // Neither half is a month, so it is not a date to reformat.
+  assert.equal(M.formatExpiry("9999"), "9999");
+});

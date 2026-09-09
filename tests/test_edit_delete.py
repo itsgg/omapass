@@ -425,6 +425,41 @@ class TestEditItem(IsolatedRuntimeDir):
         res, _ = self._edit(changes={"cvv": ""})
         self.assertTrue(res["unchanged"])
 
+    def test_a_note_body_is_edited_like_any_other_field(self):
+        """Editing a secure note erased it once: the form loaded no note and
+        the save wrote that emptiness back. Nothing covered the backend half."""
+        item = json.loads(json.dumps(FULL_ITEM))
+        item["category"] = "SECURE_NOTE"
+        item["fields"] = [{"id": "notesPlain", "type": "STRING",
+                           "purpose": "NOTES", "value": "line one\nline two"}]
+        item["urls"] = []
+        res, calls = self._edit(item=item,
+                                changes={"notesPlain": "line one\nline two\nline three"})
+        self.assertTrue(res["ok"], res.get("error"))
+        argv = calls["write"][0]
+        self.assertIn("notesPlain=line one\nline two\nline three", argv)
+
+    def test_an_unchanged_note_is_not_rewritten(self):
+        item = json.loads(json.dumps(FULL_ITEM))
+        item["category"] = "SECURE_NOTE"
+        item["fields"] = [{"id": "notesPlain", "type": "STRING",
+                           "purpose": "NOTES", "value": "the note"}]
+        item["urls"] = []
+        res, calls = self._edit(item=item, changes={"notesPlain": "the note"})
+        self.assertTrue(res["unchanged"])
+        self.assertEqual(calls["write"], [])
+
+    def test_clearing_a_note_is_sent_as_a_change(self):
+        """Emptying it on purpose has to reach op, unlike an untouched one."""
+        item = json.loads(json.dumps(FULL_ITEM))
+        item["category"] = "SECURE_NOTE"
+        item["fields"] = [{"id": "notesPlain", "type": "STRING",
+                           "purpose": "NOTES", "value": "the note"}]
+        item["urls"] = []
+        res, calls = self._edit(item=item, changes={"notesPlain": ""})
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertIn("notesPlain=", calls["write"][0])
+
     def test_a_field_can_be_cleared(self):
         """`field=` is op's own way to empty one, and it must reach op."""
         res, calls = self._edit(changes={"username": ""})
