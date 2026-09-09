@@ -11,7 +11,8 @@ of its own popup, and a footer running through the label beside it.
     tools/audit/shoot.sh list
     tools/audit/shoot-all.sh          # every state, into tools/audit/shots/
 
-Needs a running Hyprland session with Omarchy's shell modules installed. The
+Needs a running Hyprland session with Omarchy's shell modules installed, and
+`grim` to capture. `docshots.sh` additionally needs ImageMagick to crop. The
 harness runs its own layer surface and never touches the real bar.
 
 Two deviations in the copy it renders, both deliberate:
@@ -36,6 +37,12 @@ stop there is the correct result, not a gap. They get there differently: the
 list keeps focus on the search field and binds Tab itself, to cycle the
 category chips, while the details view leaves Tab unbound and simply has
 nothing else focusable for it to reach.
+
+`docshots.sh` regenerates every image the README shows, into `docs/`. Run it
+after any change to the popup's chrome. The screenshots drifted once because
+refreshing them was a manual render and crop: the details header gained an
+edit and an archive button and the list header gained a create button, and
+the README kept showing the version before all three.
 
 States: `locked`, `locked-long`, `locked-none`, `list`, `long`, `many`,
 `empty`, `no-results`, `toast`, `details`, `details-totp`, `details-totp60`,

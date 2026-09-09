@@ -33,8 +33,36 @@ OMAPASS_AUDIT_BACKDROP="${OMAPASS_AUDIT_BACKDROP:-}" \
 OMAPASS_AUDIT_STATE="$state" \
   quickshell -p "$WORK/harness.qml" >"$SHOTS/$state.log" 2>&1 &
 qs_pid=$!
+trap 'kill "$qs_pid" 2>/dev/null; wait "$qs_pid" 2>/dev/null' EXIT
+# Wait for the harness surface to actually map. Without this, a quickshell
+# that failed to launch means grim photographs the desktop instead, and the
+# result looks like a screenshot of the widget to everything downstream.
+mapped=0
+for _ in $(seq 1 80); do
+  if hyprctl layers 2>/dev/null | grep -q "omapass-audit"; then mapped=1; break; fi
+  sleep 0.1
+done
+if [ "$mapped" != 1 ]; then
+  echo "harness surface never mapped for '$state'; see $SHOTS/$state.log" >&2
+  kill "$qs_pid" 2>/dev/null
+  wait "$qs_pid" 2>/dev/null
+  exit 1
+fi
+
 # The tab-key state needs longer: it has to be driven after it renders.
 sleep "${OMAPASS_AUDIT_HOLD:-3.0}"
+
+# Checked again here, not only before the wait. The surface that maps first
+# is the fake bar, and quickshell can still die while the popup is being
+# built: the layers go with it, and grim would then photograph whatever the
+# desktop happens to be showing and hand it back as a picture of the widget.
+if ! kill -0 "$qs_pid" 2>/dev/null    || ! hyprctl layers 2>/dev/null | grep -q "omapass-audit"; then
+  echo "harness died before '$state' could be captured; see $SHOTS/$state.log" >&2
+  kill "$qs_pid" 2>/dev/null
+  wait "$qs_pid" 2>/dev/null
+  exit 1
+fi
+
 grim "$SHOTS/$state.png" 2>/dev/null
 kill "$qs_pid" 2>/dev/null
 wait "$qs_pid" 2>/dev/null
