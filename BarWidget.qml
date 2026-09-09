@@ -24,9 +24,10 @@ BarWidget {
   }
   function open() {
     root.currentView = "list"
+    // Setting this fires the panel's onOpenChanged, which does the status
+    // check and the list fetch. Doing them here as well spawned the helper
+    // twice for every open.
     popupOpen = true
-    checkStatus()
-    refreshItems()
   }
 
   // Releases the collector holding the last decrypted item.
@@ -42,6 +43,11 @@ BarWidget {
   }
 
   function forgetDetails() {
+    // The confirmation is about an item; dropping the item has to drop the
+    // question, or the scrim stays up over whatever is shown next.
+    root.pendingDeleteId = ""
+    root.pendingDeleteTitle = ""
+    deleteConfirm.opened = false
     itemDetailsProc.pendingItem = null
     root.releaseDetailsCollector()
     root.itemDetails = null
@@ -96,11 +102,30 @@ BarWidget {
   // hovers, so every action there has a key.
   property int detailIndex: 0
 
-  // The helper lifts notes out of `fields` into its own key, so keyboard
-  // navigation skipped them entirely: on a notes-only item every copy key did
-  // nothing. Appended here as a real field so the keyboard reaches it.
+  // The fields that actually get a card. FieldCard hides an empty one, so a
+  // list that still carried it let the selection land on a row that was not
+  // on screen. The Repeater below is bound to this same list rather than to
+  // the raw fields: filtering only one of the two put the focus ring on the
+  // wrong card instead, which is worse than the gap it closed.
+  readonly property var detailFieldCards: {
+    var all = (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
+    var out = []
+    for (var i = 0; i < all.length; i++) {
+      var f = all[i]
+      if (f && f.value !== undefined && f.value !== null
+          && String(f.value).trim().length > 0) {
+        out.push(f)
+      }
+    }
+    return out
+  }
+
+  // What the keyboard walks: the cards above, plus the note. The helper
+  // lifts notes out of `fields` into its own key, so navigation skipped them
+  // entirely and on a notes-only item every copy key did nothing. The note
+  // is last, so a card's index here is its index in the Repeater.
   readonly property var detailFields: {
-    var out = (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields.slice() : []
+    var out = root.detailFieldCards.slice()
     if (root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0) {
       out.push({ id: "notes", label: "notes", value: root.itemDetails.notes,
                  type: "STRING", purpose: "NOTES", concealed: false })
@@ -439,6 +464,9 @@ BarWidget {
       onStreamFinished: {
         try {
           var resp = JSON.parse(text)
+          // A list fetched before the vault locked must not repopulate the
+          // view afterwards; the locked card is meant to show nothing.
+          if (!root.unlocked) return
           if (resp.ok && resp.items) {
             root.items = resp.items
             if (resp.totalItems !== undefined) root.itemCount = resp.totalItems
@@ -927,15 +955,12 @@ BarWidget {
 
   function backToList() {
     root.forgetCreateForm()
-    itemDetailsProc.pendingItem = null
-    root.freshTotp = ""
-    root.totpExpiresAt = 0
-    root.detailIndex = 0
-    root.detailRevealed = false
+    // forgetDetails, not a copy of most of it: this repeated eight of its
+    // ten lines and left out releasing the collector, so going Back, which
+    // is how the details view is usually left, kept the decrypted item in
+    // that buffer for as long as the popup stayed open.
+    root.forgetDetails()
     root.currentView = "list"
-    root.selectedItem = null
-    root.itemDetails = null
-    root.detailsError = ""
     Qt.callLater(function() {
       if (root.unlocked) {
         searchInput.forceActiveFocus()
@@ -1058,7 +1083,7 @@ BarWidget {
         })
       }
     }
-    if (completed === "sync" || completed === "lock") {
+    if (completed === "sync") {
       root.refreshItems()
     }
     if (completed === "sync" || completed === "lock" || completed === "unlock") {
@@ -2049,12 +2074,16 @@ BarWidget {
         // The search field owns the keyboard in the list view and is hidden
         // here, so without this the details view has no key handling at all.
         focus: visible
-        Keys.onEscapePressed: root.backToList()
-        Keys.onLeftPressed: root.backToList()
-        Keys.onDownPressed: root.moveDetailField(1)
-        Keys.onUpPressed: root.moveDetailField(-1)
-        Keys.onReturnPressed: root.copyFocusedDetailField()
-        Keys.onEnterPressed: root.copyFocusedDetailField()
+        // Each guarded, because Keys.onPressed below guards the same way and
+        // which of the two Qt runs first is not something this file should
+        // depend on. Unguarded, Enter here copied the field behind the
+        // confirmation instead of answering it.
+        Keys.onEscapePressed: if (!deleteConfirm.opened) root.backToList()
+        Keys.onLeftPressed: if (!deleteConfirm.opened) root.backToList()
+        Keys.onDownPressed: if (!deleteConfirm.opened) root.moveDetailField(1)
+        Keys.onUpPressed: if (!deleteConfirm.opened) root.moveDetailField(-1)
+        Keys.onReturnPressed: if (!deleteConfirm.opened) root.copyFocusedDetailField()
+        Keys.onEnterPressed: if (!deleteConfirm.opened) root.copyFocusedDetailField()
         Keys.onPressed: function(event) {
           // While the confirmation is up it owns the keyboard, or Escape and
           // Enter would act on the item behind it.
@@ -2255,7 +2284,9 @@ BarWidget {
 
             // Fields Repeater (Only fields with valid content)
             Repeater {
-              model: (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
+              // The same list the keyboard walks, so `index` here and
+              // root.detailIndex mean the same row.
+              model: root.detailFieldCards
               delegate: FieldCard {
                 theme: appTheme
                 focusedIndex: root.detailIndex

@@ -29,7 +29,10 @@ BorderSurface {
 
   readonly property bool focused: root.focusedIndex === root.index
   readonly property bool hot: focused || fieldHover.hovered
-  readonly property bool showingValue: !(modelData.concealed && !root.revealed)
+  // Guarded, like `visible` below: a Repeater tears its delegates down with
+  // the model already gone, and an unguarded read throws on the way out.
+  readonly property bool hasData: !!modelData
+  readonly property bool showingValue: !(root.hasData && modelData.concealed && !root.revealed)
 
   onFocusedChanged: if (focused) root.visibilityRequested(y, height)
 
@@ -96,7 +99,7 @@ BorderSurface {
       spacing: Style.space(4)
 
       Button {
-        visible: !!root.modelData.concealed
+        visible: root.hasData && !!modelData.concealed
         iconText: root.revealed ? "\u{f0209}" : "\u{f0208}"
         tooltipText: root.revealed ? "Conceal (r)" : "Reveal (r)"
         accent: root.theme.accent
@@ -109,7 +112,7 @@ BorderSurface {
       }
 
       Button {
-        visible: !!root.modelData.value
+        visible: root.hasData && !!modelData.value
         iconText: "\u{f030c}"
         tooltipText: "Auto-type into active window (t)"
         accent: root.theme.accent
@@ -119,7 +122,7 @@ BorderSurface {
       }
 
       Button {
-        visible: !!root.modelData.value
+        visible: root.hasData && !!modelData.value
         iconText: "\u{f018f}"
         tooltipText: "Copy " + Model.fieldDisplayName(root.modelData) + " (c)"
         accent: root.theme.accent
