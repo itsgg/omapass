@@ -29,13 +29,27 @@ FIELD_RULES: Dict[str, Dict[str, Any]] = {
     "pin": {"ids": {"pin"}, "weak": ("pin",)},
 }
 
+def _text(value: Any) -> str:
+    """A field's value as text, treating a missing one as empty.
+
+    op writes an empty field as null, and str(None) is the four characters
+    "None", which is not empty: the field then scored as though it had a
+    value, and copying it put that word on the clipboard instead of saying
+    the field was empty.
+    """
+    return "" if value is None else str(value)
+
+
 def field_score(f: Dict[str, Any], field: str) -> int:
     """Ranks one item field as a candidate for `field`. 0 means no match."""
     rule = FIELD_RULES.get(field)
-    fid = str(f.get("id", "")).lower()
-    label = str(f.get("label", "")).lower()
-    purpose = str(f.get("purpose", "")).upper()
-    ftype = str(f.get("type", "")).upper()
+    # _text, not str: op writes an absent id as null, and str(None) is the
+    # word "None", which then scored an exact match against a field named
+    # "none" and read as a present label everywhere below.
+    fid = _text(f.get("id")).lower()
+    label = _text(f.get("label")).lower()
+    purpose = _text(f.get("purpose")).upper()
+    ftype = _text(f.get("type")).upper()
 
     if rule is None:
         # An exact id beats a label that merely reads like one: an item can
@@ -71,9 +85,9 @@ def match_field_entry(item_data: Dict[str, Any], field: str) -> Optional[Dict[st
     """Returns the best-scoring field dict for `field`, or None."""
     best_score = 0
     best: Optional[Dict[str, Any]] = None
-    for f in item_data.get("fields", []):
+    for f in item_data.get("fields") or []:
         score = field_score(f, field)
-        if score > best_score and str(f.get("value", "")):
+        if score > best_score and _text(f.get("value")):
             best_score = score
             best = f
     return best
@@ -90,10 +104,10 @@ def match_field(item_data: Dict[str, Any], field: str) -> Optional[str]:
 
     best_score = 0
     best_value: Optional[str] = None
-    for f in item_data.get("fields", []):
+    for f in item_data.get("fields") or []:
         score = field_score(f, field)
         if score > best_score:
-            value = str(f.get("value", ""))
+            value = _text(f.get("value"))
             if value:
                 best_score = score
                 best_value = value

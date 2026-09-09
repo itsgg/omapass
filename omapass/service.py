@@ -51,6 +51,16 @@ from .paths import (
     write_private,
 )
 
+def _text(value: Any) -> str:
+    """A value as text, treating null as empty.
+
+    op writes an absent field as null rather than omitting it, so a dict
+    default never fires and .upper() or .lower() on the result raises. One
+    such item used to take down the whole sync and leave the list empty.
+    """
+    return "" if value is None else str(value)
+
+
 def _digits(value: str) -> str:
     """Just the digits, for comparing values op stores in its own format."""
     return "".join(ch for ch in str(value) if ch.isdigit())
@@ -566,15 +576,16 @@ class OmaPassService:
                 if not item_id:
                     continue
 
-                title = item.get("title", "Untitled")
-                category = item.get("category", "OTHER").upper()
-                username = item.get("additional_information", "")
+                title = _text(item.get("title")) or "Untitled"
+                category = (_text(item.get("category")) or "OTHER").upper()
+                username = _text(item.get("additional_information"))
                 vault_info = item.get("vault", {})
-                vault_name = vault_info.get("name", "") if isinstance(vault_info, dict) else ""
+                vault_name = (_text(vault_info.get("name"))
+                              if isinstance(vault_info, dict) else "")
                 favorite = bool(item.get("favorite", False))
 
                 urls_list: List[str] = []
-                for u in item.get("urls", []):
+                for u in item.get("urls") or []:
                     if isinstance(u, dict) and u.get("href"):
                         urls_list.append(u["href"])
                 primary_url = urls_list[0] if urls_list else ""
@@ -587,7 +598,7 @@ class OmaPassService:
                     "url": primary_url,
                     "vault": vault_name,
                     "favorite": favorite,
-                    "updatedAt": item.get("updated_at", ""),
+                    "updatedAt": _text(item.get("updated_at")),
                 })
 
             with self.lock:
@@ -611,8 +622,8 @@ class OmaPassService:
         with self.lock:
             items = list(self.items)
 
-        q = query.strip().lower()
-        cat = category.strip().upper()
+        q = _text(query).strip().lower()
+        cat = _text(category).strip().upper()
 
         results: List[Tuple[int, Dict[str, Any]]] = []
 
@@ -639,10 +650,10 @@ class OmaPassService:
                 results.append((score, item))
                 continue
 
-            title = item.get("title", "").lower()
-            username = item.get("username", "").lower()
-            url = item.get("url", "").lower()
-            vault = item.get("vault", "").lower()
+            title = _text(item.get("title")).lower()
+            username = _text(item.get("username")).lower()
+            url = _text(item.get("url")).lower()
+            vault = _text(item.get("vault")).lower()
 
             score = 0
             if title == q:
@@ -670,7 +681,7 @@ class OmaPassService:
                     score += 50
                 results.append((score, item))
 
-        results.sort(key=lambda pair: (-pair[0], pair[1].get("title", "").lower()))
+        results.sort(key=lambda pair: (-pair[0], _text(pair[1].get("title")).lower()))
         matched = [r[1] for r in results[:limit]]
 
         return {
@@ -713,6 +724,13 @@ class OmaPassService:
             if res.returncode == 0:
                 code = res.stdout.removesuffix("\r\n").removesuffix("\n")
                 if code:
+                    with self.lock:
+                        if epoch != self.lock_epoch:
+                            # Locked while op was fetching it. A one-time code
+                            # is as much a secret as the password, and this
+                            # was the one retrieval that handed one back
+                            # regardless.
+                            return False, "Vault was locked during this request"
                     self._note_op_success(epoch)
                     return True, code
                 return False, "This item has no one-time password"
@@ -1037,20 +1055,21 @@ class OmaPassService:
                 return {"ok": False, "error": res.stderr.strip() or "Failed to retrieve item details"}
 
             raw = json.loads(res.stdout)
-            title = raw.get("title", "Untitled")
-            category = raw.get("category", "OTHER").upper()
+            title = _text(raw.get("title")) or "Untitled"
+            category = (_text(raw.get("category")) or "OTHER").upper()
             vault_info = raw.get("vault", {})
-            vault_name = vault_info.get("name", "") if isinstance(vault_info, dict) else ""
+            vault_name = (_text(vault_info.get("name"))
+                          if isinstance(vault_info, dict) else "")
             favorite = bool(raw.get("favorite", False))
-            updated_at = raw.get("updated_at", "")
+            updated_at = _text(raw.get("updated_at"))
 
             urls_list: List[Dict[str, Any]] = []
-            for u in raw.get("urls", []):
+            for u in raw.get("urls") or []:
                 if isinstance(u, dict) and u.get("href"):
                     href_str = str(u["href"]).strip()
                     if href_str:
                         urls_list.append({
-                            "label": u.get("label", "website"),
+                            "label": _text(u.get("label")) or "website",
                             "href": href_str,
                             "primary": bool(u.get("primary", False)),
                         })
@@ -1061,18 +1080,20 @@ class OmaPassService:
             totp_code = ""
             totp_period = DEFAULT_TOTP_PERIOD
 
-            for f in raw.get("fields", []):
+            for f in raw.get("fields") or []:
                 if not isinstance(f, dict):
                     continue
-                fid = f.get("id", "")
-                ftype = f.get("type", "STRING")
-                fpurpose = f.get("purpose", "")
-                flabel = f.get("label", fid)
+                # Every one of these can come back null rather than absent,
+                # and a null reaching .lower() below took out the whole item.
+                fid = _text(f.get("id"))
+                ftype = _text(f.get("type")) or "STRING"
+                fpurpose = _text(f.get("purpose"))
+                flabel = _text(f.get("label")) or fid
                 fval = f.get("value", "")
                 fsection = ""
                 sec = f.get("section")
                 if isinstance(sec, dict):
-                    fsection = sec.get("label", "")
+                    fsection = _text(sec.get("label"))
 
                 if fpurpose == "NOTES" or fid == "notesPlain" or flabel.lower() in ("notes", "secure notes"):
                     if fval and not notes_text:
@@ -1115,9 +1136,9 @@ class OmaPassService:
                 })
 
             def _field_priority(f: Dict[str, Any]) -> int:
-                fid = f.get("id", "").lower()
-                purpose = f.get("purpose", "").upper()
-                lbl = f.get("label", "").lower()
+                fid = _text(f.get("id")).lower()
+                purpose = _text(f.get("purpose")).upper()
+                lbl = _text(f.get("label")).lower()
                 if purpose == "USERNAME" or "username" in fid or "email" in fid or "user" in fid or "login" in fid:
                     return 0
                 if purpose == "PASSWORD" or "password" in fid or "pin" in fid or "pass" in lbl:
@@ -1921,6 +1942,15 @@ class OmaPassService:
         """Dispatches an RPC action request."""
         if not isinstance(request, dict):
             return {"ok": False, "error": "Request must be a JSON object"}
+
+        # op takes an item by id or by name in the same argument position, so
+        # one beginning with a dash would be read as a flag rather than as an
+        # item. Refused here, once, rather than at each of the calls that
+        # hand it to op.
+        reference = request.get("id", "")
+        if isinstance(reference, str) and reference.startswith("-"):
+            return {"ok": False, "error": "Refusing an item reference starting with '-'"}
+
         action = request.get("action", "")
         if action == "status":
             force = bool(request.get("force", False))
@@ -1932,8 +1962,8 @@ class OmaPassService:
         elif action == "sync":
             return self.sync()
         elif action == "list":
-            q = request.get("query", "")
-            cat = request.get("category", "")
+            q = _text(request.get("query"))
+            cat = _text(request.get("category"))
             limit = self._as_int(request.get("limit", 50), 50, 1, 1000)
             return self.search_items(query=q, category=cat, limit=limit)
         elif action == "get_item":
@@ -1960,38 +1990,38 @@ class OmaPassService:
             return self.list_vaults()
         elif action == "create_item":
             return self.create_item(
-                category=str(request.get("category", "LOGIN")),
-                title=str(request.get("title", "")),
+                category=_text(request.get("category")) or "LOGIN",
+                title=_text(request.get("title")) or "",
                 item_fields=request.get("fields") or {},
-                url=str(request.get("url", "")),
-                vault=str(request.get("vault", "")),
-                generate_field=str(request.get("generateField", "")),
-                password_recipe=str(request.get("recipe", DEFAULT_PASSWORD_RECIPE)),
+                url=_text(request.get("url")) or "",
+                vault=_text(request.get("vault")) or "",
+                generate_field=_text(request.get("generateField")) or "",
+                password_recipe=_text(request.get("recipe")) or DEFAULT_PASSWORD_RECIPE,
                 dry_run=bool(request.get("dryRun", False)),
             )
         elif action == "create_login":
             return self.create_login(
-                title=str(request.get("title", "")),
-                username=str(request.get("username", "")),
-                url=str(request.get("url", "")),
-                vault=str(request.get("vault", "")),
-                password_recipe=str(request.get("recipe", DEFAULT_PASSWORD_RECIPE)),
-                password=str(request.get("password", "")),
+                title=_text(request.get("title")) or "",
+                username=_text(request.get("username")) or "",
+                url=_text(request.get("url")) or "",
+                vault=_text(request.get("vault")) or "",
+                password_recipe=_text(request.get("recipe")) or DEFAULT_PASSWORD_RECIPE,
+                password=_text(request.get("password")) or "",
                 dry_run=bool(request.get("dryRun", False)),
             )
         elif action == "edit_item":
             return self.edit_item(
-                item_id=str(request.get("id", "")),
+                item_id=_text(request.get("id")) or "",
                 changes=request.get("changes") or {},
-                title=str(request.get("title", "")),
-                url=str(request.get("url", "")),
-                generate_field=str(request.get("generateField", "")),
-                password_recipe=str(request.get("recipe", DEFAULT_PASSWORD_RECIPE)),
+                title=_text(request.get("title")) or "",
+                url=_text(request.get("url")) or "",
+                generate_field=_text(request.get("generateField")) or "",
+                password_recipe=_text(request.get("recipe")) or DEFAULT_PASSWORD_RECIPE,
                 dry_run=bool(request.get("dryRun", False)),
             )
         elif action == "delete_item":
             return self.delete_item(
-                item_id=str(request.get("id", "")),
+                item_id=_text(request.get("id")) or "",
                 # Only the literal false asks for a permanent delete. bool()
                 # here would read a missing, null or 0 flag as permission to
                 # destroy the item, which is the one thing it must not mean.

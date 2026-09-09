@@ -110,5 +110,49 @@ class TestTotpPeriod(unittest.TestCase):
             self.assertEqual(fields.totp_period_from_uri(uri), 30, uri)
 
 
+class TestNullFieldValues(unittest.TestCase):
+    """op writes an absent value as null, not as an empty string.
+
+    str(None) is the four characters "None", which is truthy, so such a field
+    scored as though it held something and copying it put that word on the
+    clipboard.
+    """
+
+    def test_a_null_value_does_not_count_as_a_value(self):
+        item = {"fields": [{"id": "password", "value": None, "type": "CONCEALED"}]}
+        self.assertIsNone(fields.match_field_entry(item, "password"))
+
+    def test_a_real_value_is_still_found(self):
+        item = {"fields": [{"id": "password", "value": "real", "type": "CONCEALED"}]}
+        self.assertEqual(fields.match_field_entry(item, "password")["value"], "real")
+
+    def test_a_null_value_never_becomes_the_word_None(self):
+        """match_field, not match_field_entry: the entry carries the raw null,
+        so asserting on it passed whether or not the fix was there. This is
+        the function that returns the text a copy would put on the clipboard."""
+        item = {"fields": [{"id": "password", "value": None, "type": "CONCEALED"}]}
+        self.assertIsNone(fields.match_field(item, "password"))
+
+    def test_match_field_still_returns_a_real_value(self):
+        item = {"fields": [{"id": "password", "value": "real", "type": "CONCEALED"}]}
+        self.assertEqual(fields.match_field(item, "password"), "real")
+
+    def test_a_null_id_does_not_score_as_the_field_named_none(self):
+        """str(None) is "none" lowercased, an exact id match against a field
+        someone really did call "none"."""
+        self.assertEqual(fields.field_score({"id": None}, "none"), 0)
+        self.assertEqual(fields.field_score({"label": None}, "none"), 0)
+
+    def test_a_filled_field_wins_over_a_null_one_of_the_same_name(self):
+        item = {"fields": [
+            {"id": "password", "value": None, "type": "CONCEALED"},
+            {"id": "password", "value": "real", "type": "CONCEALED"},
+        ]}
+        self.assertEqual(fields.match_field_entry(item, "password")["value"], "real")
+
+    def test_a_null_fields_array_is_not_iterated(self):
+        self.assertIsNone(fields.match_field_entry({"fields": None}, "password"))
+
+
 if __name__ == "__main__":
     unittest.main()

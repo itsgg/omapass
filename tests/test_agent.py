@@ -735,6 +735,103 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(cleared)
         mock_clear.assert_called_once()
 
+    def test_an_item_reference_starting_with_a_dash_never_reaches_op(self):
+        """op reads it in the same position as a flag. Asserting on the error
+        text was not enough: op's own complaint also contains a dash, so the
+        test passed with the guard removed. What matters is that op is never
+        run at all."""
+        for action in ("get_item", "copy", "type", "edit_item", "delete_item"):
+            with patch("subprocess.run") as run:
+                res = self.service.dispatch({"action": action, "id": "--reveal"})
+            self.assertFalse(res["ok"], action)
+            run.assert_not_called()
+
+    def test_an_ordinary_item_reference_still_works(self):
+        with patch.object(self.service, "get_item", return_value={"ok": True}) as g:
+            self.service.dispatch({"action": "get_item", "id": "abc123"})
+        g.assert_called_once()
+
+    def test_a_one_time_code_is_not_returned_after_a_lock(self):
+        """The one retrieval that used to hand back a secret regardless."""
+        def run(cmd, *a, **k):
+            self.service.lock_epoch += 1
+            return MagicMock(returncode=0, stdout="123456\n", stderr="")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", side_effect=run):
+                ok, value = self.service.fetch_field("i1", "otp")
+        self.assertFalse(ok)
+        self.assertNotIn("123456", value)
+
+    def test_a_one_time_code_is_returned_when_still_unlocked(self):
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", return_value=MagicMock(
+                    returncode=0, stdout="123456\n", stderr="")):
+                ok, value = self.service.fetch_field("i1", "otp")
+        self.assertTrue(ok)
+        self.assertEqual(value, "123456")
+
+    def test_a_null_field_from_op_does_not_stop_the_sync(self):
+        """op writes an absent field as null, so a dict default never fires
+        and .upper() on it used to empty the whole list."""
+        raw = [{"id": "i1", "title": None, "category": None,
+                "additional_information": None, "vault": {"name": None},
+                "urls": [], "updated_at": None},
+               {"id": "i2", "title": "Real", "category": "LOGIN"}]
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", return_value=MagicMock(
+                    returncode=0, stdout=json.dumps(raw), stderr="")):
+                res = self.service.sync()
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual([i["id"] for i in self.service.items], ["i1", "i2"])
+        self.assertEqual(self.service.items[0]["title"], "Untitled")
+        self.assertEqual(self.service.items[0]["category"], "OTHER")
+
+    NULL_ROWS = [{"id": "i1", "title": None, "username": None, "url": None,
+                  "vault": None, "category": "LOGIN"},
+                 {"id": "i2", "title": "GitHub", "category": "LOGIN"}]
+
+    def test_a_null_row_survives_the_sort(self):
+        """An empty query appends every row and skips scoring, so this is the
+        path that reaches the sort key."""
+        self.service.items = list(self.NULL_ROWS)
+        res = self.service.search_items(query="")
+        self.assertTrue(res["ok"])
+        self.assertEqual(sorted(i["id"] for i in res["items"]), ["i1", "i2"])
+
+    def test_a_null_row_survives_scoring(self):
+        """A non-empty query is what runs the scoring loop over every row,
+        including the one whose title and username are null."""
+        self.service.items = list(self.NULL_ROWS)
+        res = self.service.search_items(query="git")
+        self.assertTrue(res["ok"])
+        self.assertEqual([i["id"] for i in res["items"]], ["i2"])
+
+    def test_a_null_query_does_not_crash_the_search(self):
+        """The socket carries whatever JSON it is given."""
+        self.service.items = list(self.NULL_ROWS)
+        res = self.service.dispatch({"action": "list", "query": None})
+        self.assertTrue(res["ok"], res.get("error"))
+
+    def test_a_null_title_is_not_written_as_the_word_None(self):
+        with patch.object(self.service, "create_item", return_value={"ok": True}) as c:
+            self.service.dispatch({"action": "create_item", "title": None})
+        self.assertEqual(c.call_args.kwargs["title"], "")
+
+    def test_a_null_field_does_not_stop_item_details(self):
+        """get_item_details had the same nulls and none of the same fixes."""
+        raw = {"id": "i1", "title": None, "category": None, "urls": None,
+               "vault": {"name": None}, "updated_at": None,
+               "fields": [{"id": None, "type": None, "purpose": None,
+                           "label": None, "value": "secret"}]}
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            with patch("subprocess.run", return_value=MagicMock(
+                    returncode=0, stdout=json.dumps(raw), stderr="")):
+                res = self.service.get_item("i1")
+        self.assertTrue(res["ok"], res.get("error"))
+        self.assertEqual(res["item"]["title"], "Untitled")
+        self.assertEqual(res["item"]["category"], "OTHER")
+
     def test_wipe_worker_stops_when_a_newer_copy_takes_over_mid_retry(self):
         agent.write_private(agent.token_path(), "mine")
 
