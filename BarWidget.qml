@@ -10,7 +10,7 @@ import "components"
 
 BarWidget {
   id: root
-  moduleName: "gg.omapass"
+  moduleName: "io.github.itsgg.omapass"
 
   // Open / Close lifecycle
   property bool popupOpen: false
@@ -322,10 +322,10 @@ BarWidget {
   }
 
   // Lets the popup be bound to a key, which is the point of a launcher:
-  //   omarchy-shell gg.omapass toggle
-  //   omarchy-shell gg.omapass search github
+  //   omarchy-shell io.github.itsgg.omapass toggle
+  //   omarchy-shell io.github.itsgg.omapass search github
   IpcHandler {
-    target: "gg.omapass"
+    target: "io.github.itsgg.omapass"
 
     function open(): void { root.broadcast("openFromIpc") }
     function close(): void { root.broadcast("close") }
@@ -780,7 +780,7 @@ BarWidget {
 
   // Opening the form from a search that found nothing is the common path, so
   // the query becomes the title. Reached from the empty state, the header, and
-  // `omarchy-shell gg.omapass new`.
+  // `omarchy-shell io.github.itsgg.omapass new`.
   function startCreate(title) {
     root.forgetDetails()
     root.forgetCreateForm()

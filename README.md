@@ -48,7 +48,7 @@ From the widget, three ways in, all the same form:
 - Search for something that is not there. The empty state offers to create it,
   with your query as the title, rather than being a dead end.
 - The **+** in the header.
-- `omarchy-shell gg.omapass new_login "GitHub"`, so it can go on a key.
+- `omarchy-shell io.github.itsgg.omapass new_login "GitHub"`, so it can go on a key.
 
 The form is built from a spec in `Model.js`, one entry per category, and each
 field picks its widget from 1Password's own field type. Adding a category is a
@@ -169,17 +169,17 @@ The widget exposes an IPC target, so the launcher can be opened without
 reaching for the bar:
 
 ```bash
-omarchy-shell gg.omapass toggle
-omarchy-shell gg.omapass open
-omarchy-shell gg.omapass search github   # opens with the query applied
-omarchy-shell gg.omapass sync
-omarchy-shell gg.omapass lock
+omarchy-shell io.github.itsgg.omapass toggle
+omarchy-shell io.github.itsgg.omapass open
+omarchy-shell io.github.itsgg.omapass search github   # opens with the query applied
+omarchy-shell io.github.itsgg.omapass sync
+omarchy-shell io.github.itsgg.omapass lock
 ```
 
 In `~/.config/hypr/bindings.conf`:
 
 ```
-bindd = SUPER, P, 1Password, exec, omarchy-shell gg.omapass toggle
+bindd = SUPER, P, 1Password, exec, omarchy-shell io.github.itsgg.omapass toggle
 ```
 
 ## What is cached where
@@ -224,8 +224,8 @@ code outlives its 30-second window long before the cache entry expires.
 Link the repository directly into your Omarchy plugins directory:
 
 ```bash
-ln -s "$PWD" ~/.config/omarchy/plugins/gg.omapass
-omarchy plugin enable gg.omapass
+ln -s "$PWD" ~/.config/omarchy/plugins/io.github.itsgg.omapass
+omarchy plugin enable io.github.itsgg.omapass
 ```
 
 ### Or Install from Git
@@ -234,14 +234,21 @@ omarchy plugin add https://github.com/itsgg/omapass.git --enable
 ```
 
 The widget appears in the bar's right section. Move it with
-`omarchy plugin enable gg.omapass <placement>`.
+`omarchy plugin enable io.github.itsgg.omapass <placement>`.
 
 ## Removing it
 
 ```bash
-omarchy plugin disable gg.omapass   # keep it installed, take it off the bar
-omarchy plugin remove gg.omapass    # remove it entirely
+omarchy plugin disable io.github.itsgg.omapass   # keep it installed, take it off the bar
+omarchy plugin remove io.github.itsgg.omapass    # remove it entirely
 ```
+
+If `omarchy plugin list` still shows this plugin as `gg.omapass`, you have the
+id it carried before it was published: remove it under that name and add it
+again, then put the new id back in your bar layout and in any keybinding that ran
+`omarchy-shell gg.omapass ...`. Updating in place would leave a directory named
+for the old id holding a manifest declaring the new one, with the widget gone
+from the bar and the keybinding addressing a target that no longer answers.
 
 Removal takes nothing else with it. On your machine OmaPass writes only to
 `$XDG_RUNTIME_DIR/omapass-*`, which is tmpfs and gone at logout; you can clear

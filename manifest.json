@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "gg.omapass",
+  "id": "io.github.itsgg.omapass",
   "name": "OmaPass",
   "version": "1.0.0",
   "author": "Ganesh Gunasegaran <me@itsgg.com>",

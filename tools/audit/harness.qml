@@ -69,7 +69,7 @@ ShellRoot {
       anchors.leftMargin: 120
       anchors.verticalCenter: parent.verticalCenter
       bar: fakeBar
-      moduleName: "gg.omapass"
+      moduleName: "io.github.itsgg.omapass"
     }
   }
 
