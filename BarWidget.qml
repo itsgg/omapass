@@ -2502,6 +2502,9 @@ BarWidget {
         theme: appTheme
         message: root.statusToast
       }
+
+  }
+
     // Overlay, not a layout child: ConfirmDialog paints a scrim across its
     // parent, so inside the column it was laid out with no size and never
     // appeared.
@@ -2529,7 +2532,5 @@ BarWidget {
         deleteConfirm.opened = false
       }
     }
-
-  }
 }
 }
