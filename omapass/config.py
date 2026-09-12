@@ -8,8 +8,6 @@ import hashlib
 import pathlib
 import re
 
-PLUGIN_ID = "gg.omapass"
-
 # Bumped whenever the RPC surface changes. The daemon outlives a plugin
 # update: the shell reloads the QML, but the old helper keeps serving, and a
 # widget asking for an action it does not know about just gets "Unknown
