@@ -17,14 +17,24 @@ else's code in front of the vault:
   loader or an interpreter (LD_*, PYTHON*, PATH) survives; the desktop and
   session variables the tools need are named one by one.
 
-The widget applies the same three rules on its side (a fixed command, a
-cleared environment, the same allowlist), so the request helper is already
-running under them by the time this module builds the daemon's environment.
+Two more bound every process run() starts, since a program that hangs or
+never stops talking is the other way to take the helper down: a hard
+deadline, after which the whole process group is killed and reaped, and a
+live cap on stdout and stderr, enforced as the bytes arrive rather than
+after the process has finished filling memory.
+
+The widget applies the same rules on its side (a fixed command, a cleared
+environment, the same allowlist, a deadline per request), so the request
+helper is already running under them by the time this module builds the
+daemon's environment.
 """
 
 import os
+import signal
 import stat
 import subprocess
+import threading
+import time
 from typing import Dict, List, Optional
 
 # The one interpreter the helper runs under. A fixed path rather than
@@ -138,6 +148,23 @@ def interpreter() -> List[str]:
     return [PYTHON, "-I"]
 
 
+# What run() allows a process that was given no explicit deadline, and how
+# much output it may produce before it is killed. The cap is far above any
+# real answer (a 5000-item vault lists in about 3 MB) and exists so that a
+# runaway cannot grow the helper's memory without bound.
+DEFAULT_DEADLINE = 30.0
+OUTPUT_CAP = 32 * 1024 * 1024
+
+
+class OutputTooLarge(subprocess.SubprocessError):
+    """A process was killed for producing more than the cap allows."""
+
+    def __init__(self, argv, cap: int):
+        super().__init__(f"{argv[0]} produced more than {cap} bytes and was stopped")
+        self.cmd = argv
+        self.cap = cap
+
+
 def _prepare(argv: List[str], kwargs: dict) -> None:
     """Resolves argv[0] to its trusted path and closes the environment.
 
@@ -155,13 +182,139 @@ def _prepare(argv: List[str], kwargs: dict) -> None:
     kwargs.setdefault("env", child_environment())
 
 
-def run(argv: List[str], **kwargs):
-    """subprocess.run with the boundary applied."""
+def _drain(stream, sink: List[bytes], cap: int, overflow: threading.Event) -> None:
+    """Reads a pipe as bytes arrive, stopping the moment the cap is passed.
+
+    os.read on the descriptor, not stream.read(n): the latter waits for n
+    bytes or EOF, which is not "live". Once over the cap this stops reading;
+    the pipe fills, the child blocks on its next write, and the caller kills
+    the group. Nothing past the cap is kept.
+    """
+    fd = stream.fileno()
+    total = 0
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        total += len(chunk)
+        if total > cap:
+            overflow.set()
+            return
+        sink.append(chunk)
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    """Kills everything the process started, then reaps the process itself.
+
+    The child was started in a new session, so its pid is its process group,
+    and SIGKILL to the group reaches anything it spawned that did not leave
+    the group on purpose. Killing only the child would leave a grandchild
+    holding the pipe, and the secret it was handed, alive: wl-copy forks
+    exactly such a child to hold the clipboard.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run(argv: List[str], *, stdout=None, stderr=None, text: bool = False,
+        timeout: Optional[float] = None, check: bool = False, input=None,
+        cap: int = OUTPUT_CAP, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run with the boundary applied, and bounded.
+
+    Every process gets a deadline (`timeout`, or DEFAULT_DEADLINE) and an
+    output cap. Past either, the whole process group is killed and reaped
+    and the caller gets subprocess.TimeoutExpired or OutputTooLarge, the
+    same exceptions subprocess.run's callers already handle. Output is read
+    live on a thread per pipe, so a noisy process is stopped while it is
+    talking rather than after its output has been buffered whole.
+    """
     _prepare(argv, kwargs)
-    return subprocess.run(argv, **kwargs)
+    deadline = DEFAULT_DEADLINE if timeout is None else float(timeout)
+    kwargs.setdefault("start_new_session", True)
+    stdin = subprocess.PIPE if input is not None else kwargs.pop("stdin", subprocess.DEVNULL)
+    proc = subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+
+    sinks = {"out": [], "err": []}
+    overflow = threading.Event()
+    readers = []
+    for name, stream in (("out", proc.stdout), ("err", proc.stderr)):
+        if stream is not None:
+            t = threading.Thread(target=_drain, args=(stream, sinks[name], cap, overflow), daemon=True)
+            t.start()
+            readers.append(t)
+
+    if input is not None:
+        # On a thread: a child that never reads its stdin would otherwise
+        # block this write past the pipe's buffer, and the deadline with it.
+        data = input.encode("utf-8") if isinstance(input, str) else input
+
+        def feed():
+            try:
+                proc.stdin.write(data)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        threading.Thread(target=feed, daemon=True).start()
+
+    started = time.monotonic()
+    timed_out = False
+    while proc.poll() is None:
+        if overflow.is_set():
+            kill_group(proc)
+            break
+        if time.monotonic() - started > deadline:
+            timed_out = True
+            kill_group(proc)
+            break
+        time.sleep(0.02)
+    for t, stream in zip(readers, [s for s in (proc.stdout, proc.stderr) if s is not None]):
+        # After a group kill every writer is gone and EOF is immediate. A
+        # writer that escaped the group (a setsid grandchild) keeps the pipe
+        # open and the reader blocked; that reader keeps its descriptor
+        # too. Closing it here would free the number for the next Popen,
+        # and the blocked read would then wake on that process's output.
+        t.join(timeout=2.0)
+        if not t.is_alive():
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    out = b"".join(sinks["out"]) if proc.stdout is not None else None
+    err = b"".join(sinks["err"]) if proc.stderr is not None else None
+    if text:
+        out = out.decode("utf-8", "replace") if out is not None else None
+        err = err.decode("utf-8", "replace") if err is not None else None
+    if overflow.is_set():
+        raise OutputTooLarge(argv, cap)
+    if timed_out:
+        raise subprocess.TimeoutExpired(argv, deadline, output=out, stderr=err)
+    result = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, argv, out, err)
+    return result
 
 
 def popen(argv: List[str], **kwargs):
-    """subprocess.Popen with the boundary applied."""
+    """subprocess.Popen with the boundary applied.
+
+    For the processes that are handed a secret on stdin and then waited on
+    (wl-copy, wtype), or started and left (the daemon, the app, a browser).
+    Each gets its own session, so a caller that must stop one can stop its
+    whole group, and one that is meant to outlive the helper does.
+    """
     _prepare(argv, kwargs)
+    kwargs.setdefault("start_new_session", True)
     return subprocess.Popen(argv, **kwargs)

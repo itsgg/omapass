@@ -540,11 +540,59 @@ BarWidget {
   // closing it so the child's read() sees EOF.
   function runHelper(proc, payload) {
     proc.command = root.helperCommand(payload)
+    proc.deadlineMs = root.helperDeadlineFor(payload)
     proc.stdinEnabled = true
     proc.running = true
     proc.write(JSON.stringify(payload))
     proc.stdinEnabled = false
   }
+
+  // A hard deadline on every helper request: the helper's own socket budget
+  // for the action, plus the seconds a cold daemon takes to start. A request
+  // helper that never answered (wedged on the daemon's startup lock, say)
+  // left its Process running for ever, and the widget with it: checkStatus
+  // and refreshItems both step aside while one is in flight.
+  function helperDeadlineFor(payload) {
+    var a = payload.action
+    if (a === "create_item" || a === "create_login" || a === "edit_item" || a === "delete_item") return 100000
+    if (a === "sync" || a === "get_item" || a === "unlock" || a === "copy" || a === "type") return 50000
+    if (a === "status" && payload.force) return 30000
+    return 20000
+  }
+
+  function helperTimedOut(proc, what) {
+    if (!proc.running) return
+    // SIGKILL: a deadline that can be argued with is not one. The exit
+    // handlers then run as for any other exit and clear the state they own.
+    proc.signal(9)
+    root.showToast("The helper did not answer (" + what + ") and was stopped")
+  }
+
+  component HelperDeadline: Timer {
+    id: deadline
+    required property var proc
+    required property string what
+    interval: proc.deadlineMs
+    repeat: false
+    onTriggered: root.helperTimedOut(proc, what)
+    // Started and stopped by hand rather than bound to proc.running: a
+    // non-repeating Timer writes its own running property when it fires,
+    // and whether a binding survives that write is not a question worth
+    // having in a deadline.
+    property Connections follow: Connections {
+      target: deadline.proc
+      function onRunningChanged() {
+        if (deadline.proc.running) deadline.restart()
+        else deadline.stop()
+      }
+    }
+  }
+  HelperDeadline { proc: statusProc; what: "status" }
+  HelperDeadline { proc: searchProc; what: "list" }
+  HelperDeadline { proc: itemDetailsProc; what: "item" }
+  HelperDeadline { proc: otpProc; what: "code" }
+  HelperDeadline { proc: vaultsProc; what: "vaults" }
+  HelperDeadline { proc: actionProc; what: "action" }
 
   // Status check process.
   //
@@ -557,6 +605,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -610,6 +660,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     // Set when a query arrives while a search is already in flight, so the
     // last keystroke is never the one that gets dropped.
     property bool pending: false
@@ -729,6 +781,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     // The item this fetch was issued for, so a response that lands after the
     // user closed or navigated away cannot be adopted.
     property string requestedId: ""
@@ -864,6 +918,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     // The item this request was issued for. A response that arrives after the
     // user has moved on must not overwrite the code shown for another item.
     property string requestedId: ""
@@ -1100,6 +1156,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1168,6 +1226,8 @@ BarWidget {
     running: false
     clearEnvironment: true
     environment: root.helperEnvironment
+    // Set per request by runHelper; HelperDeadline above enforces it.
+    property int deadlineMs: 20000
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

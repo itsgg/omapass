@@ -25,7 +25,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
         created = json.dumps({"id": "new1", "title": kwargs.get("title", "T"),
                               "vault": {"name": "Personal"}})
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout=created, stderr="")) as run:
                 with patch.object(self.service, "sync"):
                     res = self.service.create_login(**kwargs)
@@ -61,7 +61,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=capture):
+            with patch("omapass.boundary.run", side_effect=capture):
                 with patch.object(self.service, "sync"):
                     self.service.create_login(title="X", username="u")
 
@@ -75,14 +75,14 @@ class TestCreateLogin(IsolatedRuntimeDir):
 
     def test_a_bogus_recipe_is_refused_before_op_sees_it(self):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run") as run:
+            with patch("omapass.boundary.run") as run:
                 res = self.service.create_login(title="X", password_recipe="; rm -rf /")
         self.assertFalse(res["ok"])
         run.assert_not_called()
 
     def test_a_non_web_url_is_refused(self):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run") as run:
+            with patch("omapass.boundary.run") as run:
                 res = self.service.create_login(title="X", url="javascript:alert(1)")
         self.assertFalse(res["ok"])
         run.assert_not_called()
@@ -107,7 +107,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=lock_during):
+            with patch("omapass.boundary.run", side_effect=lock_during):
                 with patch.object(self.service, "sync") as sync:
                     res = self.service.create_login(title="X")
 
@@ -117,7 +117,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
     def test_a_new_item_triggers_a_sync_so_it_appears_in_the_list(self):
         created = json.dumps({"id": "n", "title": "X", "vault": {"name": "P"}})
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout=created, stderr="")):
                 with patch.object(self.service, "sync") as sync:
                     self.service.create_login(title="X")
@@ -142,7 +142,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=capture):
+            with patch("omapass.boundary.run", side_effect=capture):
                 with patch.object(self.service, "sync"):
                     self.service.create_login(title="X", password="hunter2")
 
@@ -163,7 +163,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
     def test_a_typed_password_skips_recipe_validation(self):
         """The recipe is irrelevant when the user supplied the password."""
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout="{}", stderr="")):
                 with patch.object(self.service, "sync"):
                     res = self.service.create_login(title="X", password="p", password_recipe="junk")
@@ -184,7 +184,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
                             sent_template["path"] = path
                     return MagicMock(returncode=0, stdout="{}", stderr="")
 
-                with patch("subprocess.run", side_effect=run):
+                with patch("omapass.boundary.run", side_effect=run):
                     with patch.object(self.service, "sync"):
                         res = self.service.create_item(category=category, title="X")
             self.assertTrue(res["ok"], category)
@@ -195,7 +195,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
 
     def test_an_unknown_category_is_refused(self):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run") as run:
+            with patch("omapass.boundary.run") as run:
                 res = self.service.create_item(category="NUCLEAR_CODES", title="X")
         self.assertFalse(res["ok"])
         run.assert_not_called()
@@ -211,7 +211,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=capture):
+            with patch("omapass.boundary.run", side_effect=capture):
                 with patch.object(self.service, "sync"):
                     self.service.create_item(
                         category="CREDIT_CARD", title="Acme",
@@ -240,7 +240,7 @@ class TestCreateLogin(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=capture):
+            with patch("omapass.boundary.run", side_effect=capture):
                 with patch.object(self.service, "sync"):
                     self.service.create_item(
                         category="SECURE_NOTE", title="Codes",
@@ -272,7 +272,7 @@ class TestCreateUpdatesTheList(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout=json.dumps(created), stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=run):
+            with patch("omapass.boundary.run", side_effect=run):
                 with patch.object(self.service, "sync"):
                     res = self.service.create_item(
                         category="LOGIN", title="GitHub",
@@ -302,7 +302,7 @@ class TestCreateUpdatesTheList(IsolatedRuntimeDir):
 
     def test_a_dry_run_adds_nothing(self):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout=json.dumps({"id": "x"}), stderr="")):
                 with patch.object(self.service, "sync"):
                     self.service.create_item(category="LOGIN", title="T",

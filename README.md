@@ -341,6 +341,22 @@ stdin, the copied value to `wl-copy` on stdin, the typed value to `wtype` on
 stdin, and the wipe token in the worker's environment. The one exception is
 documented under [Editing and removing](#editing-and-removing).
 
+Two more bounds, because a process that hangs or never stops talking is the
+other way to take the helper down:
+
+- **A deadline on every process.** The widget kills a helper request that
+  has not answered within its action's budget (20 s for a status or list, up
+  to 100 s for a write, which can run `op` three times) and says so. The
+  helper gives every program it runs a deadline of its own (30 s where the
+  call names none), and past it kills the program's whole process group, so
+  a child the program started does not outlive it holding the pipe, then
+  reaps it.
+- **A live cap on output.** The helper reads a program's stdout and stderr as
+  the bytes arrive and stops the program the moment it passes 32 MB, rather
+  than buffering whatever it produces and looking afterwards. The widget's
+  own input is bounded by the helper, which refuses a daemon answer over 1 MB
+  while reading it.
+
 ## CLI Usage
 
 The helper script `omapass-agent.py` can also be called directly:

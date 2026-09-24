@@ -901,10 +901,12 @@ class OmaPassService:
                             return {"ok": False, "error": f"wl-copy failed with exit status {proc.returncode}"}
                     except subprocess.TimeoutExpired:
                         # It may already own the selection, or be about to.
-                        # Kill it and clear, rather than leaving an unreaped
-                        # process holding a credential.
+                        # Kill its whole group and clear, rather than leaving
+                        # an unreaped process holding a credential: wl-copy
+                        # forks a child to hold the selection, and killing
+                        # only the parent left that child alive.
                         try:
-                            proc.kill()
+                            boundary.kill_group(proc)
                             proc.communicate(timeout=1.0)
                         except Exception:
                             pass
@@ -1088,7 +1090,7 @@ class OmaPassService:
                 proc.communicate(input=value.encode("utf-8"), timeout=5.0)
             except Exception:
                 try:
-                    proc.kill()
+                    boundary.kill_group(proc)
                 except Exception:
                     pass
 

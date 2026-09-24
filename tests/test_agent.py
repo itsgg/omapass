@@ -137,7 +137,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         res = self.service.dispatch({"action": "nonexistent"})
         self.assertFalse(res["ok"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_preserves_whitespace(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
             "id": "item1", "title": "T", "category": "LOGIN",
@@ -169,7 +169,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
                 self.assertIn("error", res)
                 self.assertIn("Failed to run wl-copy", res["error"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_get_status_desktop_integration(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -189,7 +189,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.assertTrue(cached_status["unlocked"])
             mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_get_item_parsing_and_caching(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -227,7 +227,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.assertEqual(cached_res["item"]["title"], "Amazon")
             mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_totp_is_never_written_to_the_details_cache(self, mock_run):
         """The README says TOTP is never cached; make that true, not aspirational."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -273,7 +273,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         ]:
             self.assertEqual(agent.totp_period_from_uri(uri), 30, uri)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_item_reports_its_own_totp_period(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
             "id": "p1", "title": "Slow", "category": "LOGIN",
@@ -286,7 +286,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             # Survives caching, like hasTotp, so a reopen keeps the right timer.
             self.assertEqual(self.service.get_item("p1")["item"]["totpPeriod"], 60)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_item_without_totp_is_not_marked_as_having_one(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
             "id": "n1", "title": "Plain", "category": "LOGIN",
@@ -331,7 +331,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             },
         }
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_reads_from_item_cache(self, mock_run):
         self._seed_details_cache()
 
@@ -347,7 +347,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             # subprocess.run must not be called when item is in cache
             mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_never_serves_totp_from_cache(self, mock_run):
         """A cached TOTP is expired by definition; op must be asked for a fresh one."""
         self._seed_details_cache()
@@ -363,7 +363,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertEqual(code, "111222")
         self.assertIn("--otp", mock_run.call_args[0][0])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_expired_details_are_refetched(self, mock_run):
         self._seed_details_cache(timestamp=time.time() - agent.DETAILS_CACHE_TTL - 1)
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -384,7 +384,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.service.purge_expired_details()
         self.assertEqual(self.service.item_details_cache, {})
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_matches_on_purpose_not_label(self, mock_run):
         """A password field labelled something other than "password" is still found."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -403,7 +403,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(ok)
         self.assertEqual(pw, "hunter2")
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_card_fields(self, mock_run):
         """Card items have no password or username; these are what they do have."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -427,7 +427,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
                 self.assertTrue(ok, field)
                 self.assertEqual(val, expected, field)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_notes_field(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
             "id": "note1", "title": "Wifi", "category": "SECURE_NOTE",
@@ -485,14 +485,14 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_fetch_field_rejects_malformed_field_name(self):
         """A field name is either canonical or a plain field id, nothing else."""
-        with patch("subprocess.run") as mock_run:
+        with patch("omapass.boundary.run") as mock_run:
             with patch.object(self.service, "check_op_installed", return_value=True):
                 for bad in ("../../etc/passwd", "a b", "x" * 100, "$(id)", ""):
                     ok, err = self.service.fetch_field("item1", bad)
                     self.assertFalse(ok, bad)
         mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_accepts_a_custom_field_id(self, mock_run):
         """The details view copies custom fields by id, never by value."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -568,7 +568,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertFalse(self.service.auth_failed)
         self.assertFalse(agent.OmaPassService().auth_failed)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_fetch_field_success_clears_auth_failure(self, mock_run):
         self.service.auth_failed = True
         self.service.is_unlocked = False
@@ -585,7 +585,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.is_unlocked)
         self.assertFalse(self.service.auth_failed)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_full_item_fallback_preserves_whitespace(self, mock_run):
         """The credential is copied verbatim, spaces included."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps({
@@ -662,7 +662,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         agent.write_private(agent.wipe_pid_path(), "1234")
         digest = clipboard.digest_of("the-secret")
 
-        with patch("subprocess.run", side_effect=self._paste(0, b"a shopping list")):
+        with patch("omapass.boundary.run", side_effect=self._paste(0, b"a shopping list")):
             with patch.object(clipboard, "clear_clipboard_once") as mock_clear:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine", digest)
@@ -676,7 +676,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         agent.write_private(agent.token_path(), "mine")
         digest = clipboard.digest_of("the-secret")
 
-        with patch("subprocess.run", side_effect=self._paste(0, b"the-secret")):
+        with patch("omapass.boundary.run", side_effect=self._paste(0, b"the-secret")):
             with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine", digest)
@@ -689,7 +689,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         unreachable compositor, and only the first means the secret has gone.
         Clearing an empty clipboard is a no-op, so both take the safe path."""
         agent.write_private(agent.token_path(), "mine")
-        with patch("subprocess.run", side_effect=self._paste(1, b"")):
+        with patch("omapass.boundary.run", side_effect=self._paste(1, b"")):
             with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine", clipboard.digest_of("x"))
@@ -698,7 +698,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_an_unreadable_clipboard_is_cleared_anyway(self):
         """Not being able to look is not evidence the secret has gone."""
         agent.write_private(agent.token_path(), "mine")
-        with patch("subprocess.run", side_effect=OSError("no wl-paste")):
+        with patch("omapass.boundary.run", side_effect=OSError("no wl-paste")):
             with patch.object(clipboard, "clear_clipboard_once", return_value=True) as mock_clear:
                 with patch("time.sleep"):
                     agent.run_wipe_worker(0, "mine", clipboard.digest_of("x"))
@@ -713,7 +713,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_clear.assert_called_once()
 
     def test_locking_does_not_clobber_what_the_user_copied(self):
-        with patch("subprocess.run", side_effect=self._paste(0, b"their own text")):
+        with patch("omapass.boundary.run", side_effect=self._paste(0, b"their own text")):
             with patch.object(clipboard, "clear_clipboard_once") as mock_clear:
                 cleared = clipboard.wipe_clipboard_now(clipboard.digest_of("the-secret"))
         self.assertTrue(cleared, "the secret is already off the clipboard")
@@ -741,7 +741,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         test passed with the guard removed. What matters is that op is never
         run at all."""
         for action in ("get_item", "copy", "type", "edit_item", "delete_item"):
-            with patch("subprocess.run") as run:
+            with patch("omapass.boundary.run") as run:
                 res = self.service.dispatch({"action": action, "id": "--reveal"})
             self.assertFalse(res["ok"], action)
             run.assert_not_called()
@@ -758,14 +758,14 @@ class TestOmaPassService(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="123456\n", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=run):
+            with patch("omapass.boundary.run", side_effect=run):
                 ok, value = self.service.fetch_field("i1", "otp")
         self.assertFalse(ok)
         self.assertNotIn("123456", value)
 
     def test_a_one_time_code_is_returned_when_still_unlocked(self):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout="123456\n", stderr="")):
                 ok, value = self.service.fetch_field("i1", "otp")
         self.assertTrue(ok)
@@ -779,7 +779,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
                 "urls": [], "updated_at": None},
                {"id": "i2", "title": "Real", "category": "LOGIN"}]
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout=json.dumps(raw), stderr="")):
                 res = self.service.sync()
         self.assertTrue(res["ok"], res.get("error"))
@@ -825,7 +825,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
                "fields": [{"id": None, "type": None, "purpose": None,
                            "label": None, "value": "secret"}]}
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout=json.dumps(raw), stderr="")):
                 res = self.service.get_item("i1")
         self.assertTrue(res["ok"], res.get("error"))
@@ -865,7 +865,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_warn.assert_called_once()
         self.assertTrue(agent.token_path().exists())
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_otp_action_always_asks_op(self, mock_run):
         self._seed_details_cache()
         mock_run.return_value = MagicMock(returncode=0, stdout="999888\n", stderr="")
@@ -880,7 +880,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_otp_action_requires_id(self):
         self.assertFalse(self.service.dispatch({"action": "otp"})["ok"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_copying_an_otp_field_returns_a_live_code_not_the_seed(self, mock_run):
         """The details row's value is the otpauth:// URI: the permanent secret."""
         seed = "otpauth://totp/Acme?secret=JBSWY3DPEHPK3PXP&issuer=Acme"
@@ -951,12 +951,12 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_lock_reports_failure_when_nothing_actually_locked(self):
         with patch.object(service, "wipe_clipboard_now", return_value=True):
             with patch("omapass.boundary.tool", return_value="/usr/bin/1password"):
-                with patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                with patch("omapass.boundary.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
         self.assertFalse(res["ok"])
         self.assertIn("did not lock", res["error"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_forced_status_failure_revokes_the_cached_secrets(self, mock_run):
         self._seed_details_cache()
         self.service.is_unlocked = True
@@ -974,7 +974,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         """1Password not installed: the signout result is then the whole verdict."""
         with patch.object(service, "wipe_clipboard_now", return_value=True):
             with patch("omapass.boundary.tool", return_value=None):
-                with patch("subprocess.run", return_value=MagicMock(returncode=1)):
+                with patch("omapass.boundary.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
         self.assertFalse(res["ok"])
 
@@ -989,11 +989,11 @@ class TestOmaPassService(IsolatedRuntimeDir):
         before = self.service.lock_epoch
         with patch.object(service, "wipe_clipboard_now", side_effect=record):
             with patch("omapass.boundary.tool", return_value=None):
-                with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                with patch("omapass.boundary.run", return_value=MagicMock(returncode=0)):
                     self.service.lock_vault()
         self.assertEqual(seen["epoch_during_wipe"], before + 1)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_forced_status_revokes_on_an_unrecognised_error(self, mock_run):
         """The failed check is the evidence; op's wording varies by version."""
         self._seed_details_cache()
@@ -1007,7 +1007,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.auth_failed)
         self.assertEqual(self.service.item_details_cache, {})
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_forced_status_reports_a_dismissed_prompt(self, mock_run):
         """A cancelled dialog is reported, so the widget stops raising it again.
 
@@ -1031,7 +1031,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         # Still revoked: the dismissal is a hint to the widget, not a verdict.
         self.assertTrue(self.service.auth_failed)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_forced_status_failure_is_not_called_a_dismissal(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="[ERROR] you are not currently signed in")
@@ -1041,7 +1041,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
         self.assertFalse(status["dismissed"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_a_list_says_when_the_vault_is_still_being_synced(self, mock_run):
         """An empty answer before the first sync is not an empty vault.
 
@@ -1107,7 +1107,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             threads[1]()
             self.assertFalse(self.service.syncing)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_a_linked_sign_in_is_shown_as_the_provider_and_cannot_be_edited(self, mock_run):
         """op reports the "sign in with" field with no value at all.
 
@@ -1146,7 +1146,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         # A field with a value still comes through.
         self.assertIn("kid", [f["id"] for f in item["fields"]])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_a_linked_sign_in_whose_provider_is_unknown_still_gets_a_row(self, mock_run):
         self.service.items = []
         raw = {"id": "sso2", "title": "X", "category": "LOGIN",
@@ -1156,7 +1156,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             res = self.service.get_item("sso2")
         self.assertEqual(res["item"]["fields"][0]["value"], "a linked account")
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_an_ordinary_login_is_editable(self, mock_run):
         raw = {"id": "l1", "title": "GitHub", "category": "LOGIN",
                "fields": [{"id": "username", "type": "STRING", "purpose": "USERNAME",
@@ -1257,7 +1257,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertIn("desktop app", res["error"])
         mock_popen.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_list_vaults(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps([
             {"id": "v1", "name": "Personal"},
@@ -1270,7 +1270,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         # A vault with no name is not something the picker can show.
         self.assertEqual([v["name"] for v in res["vaults"]], ["Personal", "Work"])
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_list_vaults_reports_op_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not signed in")
         with patch.object(self.service, "check_op_installed", return_value=True):
@@ -1303,14 +1303,14 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_wipe_worker_skips_superseded_token(self):
         agent.write_private(agent.token_path(), "newer-token")
-        with patch("subprocess.run") as mock_run:
+        with patch("omapass.boundary.run") as mock_run:
             agent.run_wipe_worker(0, "older-token")
         mock_run.assert_not_called()
         self.assertTrue(agent.token_path().exists())
 
     def test_wipe_worker_clears_when_token_matches(self):
         agent.write_private(agent.token_path(), "mine")
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        with patch("omapass.boundary.run", return_value=MagicMock(returncode=0)) as mock_run:
             agent.run_wipe_worker(0, "mine")
         mock_run.assert_called_once()
         self.assertIn("--clear", mock_run.call_args[0][0])
@@ -1329,7 +1329,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.service._save_cache()
         self.assertEqual(agent.cache_path().stat().st_mode & 0o777, 0o600)
 
-    @patch("subprocess.run")
+    @patch("omapass.boundary.run")
     def test_get_status_locked_fast_account_list(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0

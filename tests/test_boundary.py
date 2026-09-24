@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -132,34 +133,113 @@ class TestTool(unittest.TestCase):
 
 
 class TestRun(unittest.TestCase):
+    """run() against real processes: what it closes, bounds and kills."""
+
+    def setUp(self):
+        sh = patch("omapass.boundary.tool", return_value="/bin/sh")
+        sh.start()
+        self.addCleanup(sh.stop)
+
     def test_run_executes_the_resolved_path_under_the_closed_environment(self):
-        with patch("omapass.boundary.tool", return_value="/usr/bin/op"):
-            with patch("subprocess.run") as mock_run:
-                with patch.dict(os.environ, {"LD_PRELOAD": "/tmp/x", "HOME": "/h"}, clear=True):
-                    boundary.run(["op", "whoami"], timeout=1.0)
-        argv = mock_run.call_args[0][0]
-        kwargs = mock_run.call_args.kwargs
-        # argv[0] stays the name; what runs is the trusted path.
-        self.assertEqual(argv, ["op", "whoami"])
-        self.assertEqual(kwargs["executable"], "/usr/bin/op")
-        self.assertNotIn("LD_PRELOAD", kwargs["env"])
-        self.assertEqual(kwargs["env"]["HOME"], "/h")
-        self.assertEqual(kwargs["timeout"], 1.0)
+        with patch.dict(os.environ, {"LD_PRELOAD": "/tmp/x", "HOME": "/h"}, clear=True):
+            # argv[0] is not a shell; what runs is the resolved path.
+            res = boundary.run(["notsh", "-c", "/usr/bin/env"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("HOME=/h\n", res.stdout)
+        self.assertIn("PATH=/usr/local/bin:/usr/bin:/bin\n", res.stdout)
+        self.assertNotIn("LD_PRELOAD", res.stdout)
+
+    def test_an_explicit_environment_is_kept(self):
+        with patch.dict(os.environ, {"HOME": "/h", "XDG_RUNTIME_DIR": "/r"}, clear=True):
+            res = boundary.run(["sh", "-c", "/usr/bin/env"], env={"ONLY": "this"},
+                               stdout=subprocess.PIPE, text=True, timeout=10)
+        # The shell adds PWD, SHLVL and _ of its own; nothing of ours is inherited.
+        names = {line.split("=")[0] for line in res.stdout.splitlines()}
+        self.assertIn("ONLY", names)
+        self.assertNotIn("HOME", names)
+        self.assertNotIn("XDG_RUNTIME_DIR", names)
+        self.assertNotIn("PATH", names)
 
     def test_a_program_outside_the_trusted_directories_never_runs(self):
         with patch("omapass.boundary.tool", return_value=None):
-            with patch("subprocess.run") as mock_run:
+            with patch("subprocess.Popen") as mock_popen:
                 with self.assertRaises(FileNotFoundError):
                     boundary.run(["op", "whoami"])
                 with self.assertRaises(FileNotFoundError):
                     boundary.popen(["wl-copy"])
-        mock_run.assert_not_called()
+        mock_popen.assert_not_called()
 
-    def test_an_explicit_environment_is_kept(self):
-        with patch("omapass.boundary.tool", return_value="/usr/bin/x"):
-            with patch("subprocess.Popen") as mock_popen:
-                boundary.popen(["x"], env={"ONLY": "this"})
-        self.assertEqual(mock_popen.call_args.kwargs["env"], {"ONLY": "this"})
+    def test_output_past_the_cap_stops_the_program_while_it_is_talking(self):
+        started = time.monotonic()
+        with self.assertRaises(boundary.OutputTooLarge):
+            boundary.run(["sh", "-c", "yes | head -c 50000000"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, cap=100000)
+        # Stopped at the cap, not after 50 MB or after the deadline. Generous
+        # for a loaded runner: the kill itself lands within milliseconds.
+        self.assertLess(time.monotonic() - started, 20)
+
+    def test_the_deadline_kills_the_whole_process_group_and_reaps(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "pid"
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                boundary.run(["sh", "-c", f"sleep 30 & echo $! > {pidfile}; sleep 30"],
+                             stdout=subprocess.PIPE, timeout=0.5)
+            self.assertLess(time.monotonic() - started, 8)
+            child = int(pidfile.read_text().strip())
+        # The grandchild sleep went with the group, not just the shell.
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(child, 9)
+            self.fail("the grandchild survived the group kill")
+
+    def test_a_deadline_applies_when_the_caller_names_none(self):
+        with patch.object(boundary, "DEFAULT_DEADLINE", 0.3):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                boundary.run(["sh", "-c", "sleep 30"], stdout=subprocess.DEVNULL)
+
+    def test_input_and_check_work_as_with_subprocess_run(self):
+        res = boundary.run(["sh", "-c", "cat"], input="hello", stdout=subprocess.PIPE, text=True, timeout=10)
+        self.assertEqual(res.stdout, "hello")
+        # A child that never reads its stdin cannot hold the deadline hostage
+        # through a write bigger than the pipe.
+        with self.assertRaises(subprocess.TimeoutExpired):
+            boundary.run(["sh", "-c", "sleep 30"], input="x" * 200000, stdout=subprocess.DEVNULL, timeout=0.5)
+
+    def test_a_timed_out_wl_copy_style_child_is_killed_with_its_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "pid"
+            proc = boundary.popen(["sh", "-c", f"sleep 30 & echo $! > {pidfile}; sleep 30"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                proc.communicate(input=b"secret", timeout=0.5)
+            boundary.kill_group(proc)
+            self.assertIsNotNone(proc.returncode)
+            for _ in range(50):
+                if not pidfile.exists() or not pidfile.read_text().strip():
+                    time.sleep(0.05)
+                    continue
+                child = int(pidfile.read_text().strip())
+                break
+            else:
+                self.fail("the shell never wrote its child's pid")
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(child, 9)
+            self.fail("the background child survived the group kill")
+        with self.assertRaises(subprocess.CalledProcessError):
+            boundary.run(["sh", "-c", "exit 3"], check=True, timeout=10)
 
 
 class TestInterpreter(unittest.TestCase):
@@ -198,13 +278,19 @@ class TestWidgetSide(unittest.TestCase):
         self.assertIn('return ["/usr/bin/python3", "-I", root.helperPath, "request", "-"]', WIDGET)
         self.assertNotRegex(WIDGET, r'\["python3"')
 
-    def test_every_helper_process_clears_its_environment(self):
+    def test_every_helper_process_clears_its_environment_and_has_a_deadline(self):
         blocks = re.findall(r"\n  Process \{\n(.*?)\n  \}\n", WIDGET, re.S)
         self.assertGreaterEqual(len(blocks), 6, "expected the six helper processes")
+        ids = []
         for block in blocks:
-            head = block[:400]
+            head = block[:500]
             self.assertIn("clearEnvironment: true", head, block[:120])
             self.assertIn("environment: root.helperEnvironment", head, block[:120])
+            self.assertIn("property int deadlineMs", head, block[:120])
+            ids.append(re.search(r"id: (\w+)", head).group(1))
+        for pid in ids:
+            self.assertIn(f"HelperDeadline {{ proc: {pid};", WIDGET, pid)
+        self.assertIn("proc.deadlineMs = root.helperDeadlineFor(payload)", WIDGET)
 
 
 class TestDaemonSpawn(IsolatedRuntimeDir):

@@ -97,7 +97,7 @@ class TestEditItem(IsolatedRuntimeDir):
                 apply_assignments(item, cmd)), stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=run):
+            with patch("omapass.boundary.run", side_effect=run):
                 with patch.object(self.service, "sync"):
                     res = self.service.edit_item(item_id="i1", **kwargs)
         return res, calls
@@ -539,7 +539,7 @@ class TestEditItem(IsolatedRuntimeDir):
             return MagicMock(returncode=0, stdout="{}", stderr="")
 
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", side_effect=run):
+            with patch("omapass.boundary.run", side_effect=run):
                 with patch.object(self.service, "sync") as sync:
                     res = self.service.edit_item(item_id="i1", changes={"username": "u"})
         self.assertFalse(res["ok"])
@@ -614,7 +614,7 @@ class TestDeleteItem(IsolatedRuntimeDir):
 
     def _delete(self, **kwargs):
         with patch.object(self.service, "check_op_installed", return_value=True):
-            with patch("subprocess.run", return_value=MagicMock(
+            with patch("omapass.boundary.run", return_value=MagicMock(
                     returncode=0, stdout="", stderr="")) as run:
                 with patch.object(self.service, "sync"):
                     res = self.service.delete_item(item_id="i1", **kwargs)
