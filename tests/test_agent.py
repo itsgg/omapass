@@ -1007,6 +1007,40 @@ class TestOmaPassService(IsolatedRuntimeDir):
         self.assertTrue(self.service.auth_failed)
         self.assertEqual(self.service.item_details_cache, {})
 
+    @patch("subprocess.run")
+    def test_forced_status_reports_a_dismissed_prompt(self, mock_run):
+        """A cancelled dialog is reported, so the widget stops raising it again.
+
+        Only the first command can have raised the dialog. The fallback
+        answers differently here, so reading its stderr instead would fail;
+        and it must not run at all after a dismissal, since a fallback that
+        timed out reported the cancel as a timeout.
+        """
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="",
+                      stderr="[ERROR] 2026/09/15 16:41:57 authorization prompt dismissed, please try again"),
+            subprocess.TimeoutExpired(cmd="op whoami", timeout=4.0),
+        ]
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=True)
+
+        self.assertFalse(status["unlocked"])
+        self.assertTrue(status["dismissed"])
+        self.assertEqual(mock_run.call_count, 1)
+        # Still revoked: the dismissal is a hint to the widget, not a verdict.
+        self.assertTrue(self.service.auth_failed)
+
+    @patch("subprocess.run")
+    def test_forced_status_failure_is_not_called_a_dismissal(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="[ERROR] you are not currently signed in")
+
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            status = self.service.get_status(force=True)
+
+        self.assertFalse(status["dismissed"])
+
     def test_unlock_does_not_open_quick_access(self):
         """Quick Access is a search window: it authorizes nothing.
 

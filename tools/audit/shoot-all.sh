@@ -5,7 +5,7 @@ A="$(dirname "$(readlink -f "$0")")"
 SHOTS="${XDG_CACHE_HOME:-$HOME/.cache}/omapass-audit/shots"
 for state in locked locked-long locked-none list long many empty no-results toast \
              details details-totp details-totp60 details-legacy details-card \
-             details-notes details-many details-error details-loading \
+             details-notes details-many details-error details-loading details-url-focus \
              details-edit details-edit-note details-delete \
              create create-empty create-card create-note; do
   "$A/shoot.sh" "$state" >/dev/null
@@ -25,5 +25,9 @@ done
 # Tab key. That needs a real keypress.
 echo "tab key:"
 "$A/tabkey.sh" Tab | sed 's/^.*TAB-KEY/  /'
+# Unlocking hands the keyboard to 1Password's dialog and takes it back; only
+# a real Return on the locked card shows the first half.
+echo "unlock handoff:"
+"$A/unlockkey.sh" | sed 's/^.*UNLOCK-HANDOFF/  /'
 
 echo "shots in ${XDG_CACHE_HOME:-$HOME/.cache}/omapass-audit/shots"

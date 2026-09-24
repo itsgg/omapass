@@ -302,3 +302,30 @@ test("formatExpiry resolves a four digit date by which half is a month", () => {
   // Neither half is a month, so it is not a date to reformat.
   assert.equal(M.formatExpiry("9999"), "9999");
 });
+
+test("detailEntries walks cards, then websites, then the note, skipping empties", () => {
+  const details = {
+    fields: [
+      { id: "username", value: "octocat" },
+      { id: "blank", value: "   " },
+      { id: "missing", value: null },
+      { id: "password", value: "hunter2", concealed: true },
+    ],
+    urls: [{ href: "https://a.example" }, { href: "" }, { href: "https://b.example", primary: true }],
+    notes: "a note",
+  };
+  const entries = plain(M.detailEntries(details));
+  assert.deepEqual(entries.map((e) => e.id), ["username", "password", "url:0", "url:1", "notes"]);
+  assert.equal(entries[2].kind, "url");
+  assert.equal(entries[3].href, "https://b.example");
+  assert.equal(entries[4].kind, "notes");
+  // The widget's Repeaters are bound to these two lists, so a website's row
+  // index is its entry's index minus the cards before it.
+  assert.equal(M.detailFieldCards(details).length, 2);
+  assert.deepEqual(plain(M.detailUrls(details)).map((u) => u.href), ["https://a.example", "https://b.example"]);
+});
+
+test("detailEntries of nothing is empty rather than a throw", () => {
+  assert.deepEqual(plain(M.detailEntries(null)), []);
+  assert.deepEqual(plain(M.detailEntries({ fields: [], urls: [{}], notes: "  " })), []);
+});

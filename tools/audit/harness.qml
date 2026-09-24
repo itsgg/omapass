@@ -219,6 +219,11 @@ ShellRoot {
       widget.account = "you@example.com"
       return
     }
+    if (harness.state === "locked-handoff") {
+      widget.account = "you@example.com"
+      handoffReadyTimer.running = true
+      return
+    }
 
     widget.account = "you@example.com"
     widget.itemCount = 367
@@ -305,6 +310,16 @@ ShellRoot {
       }
     }
 
+    // A website row with the keyboard on it: websites joined the walk after
+    // the field cards, and the ring has to land on the row being acted on.
+    if (harness.state === "details-url-focus") {
+      widget.selectedItem = harness.demoItems[0]
+      widget.itemDetails = harness.demoDetails("demo-details")
+      widget.currentView = "details"
+      widget.detailIndex = widget.detailFieldCards.length
+      console.log("URL-FOCUS focusedUrlIndex=" + widget.focusedUrlIndex
+        + " entry=" + JSON.stringify(widget.focusedDetailField))
+    }
     if (harness.state === "details-edit") {
       widget.selectedItem = harness.loginItem
       widget.itemDetails = harness.detailsFixture("details")
@@ -461,6 +476,101 @@ ShellRoot {
       base.notes = "A secure note that runs on for a while so the notes card has to scroll.\nSecond line.\nThird line.\nFourth line.\nFifth line."
     }
     return base
+  }
+
+  // unlockkey.sh: the unlock handoff. A real Return on the locked card has to
+  // take the popup out of the way of 1Password's dialog, which cannot get the
+  // keyboard or a click while the full-screen panel is up. A cancelled dialog
+  // brings the popup back on the locked card, and an unlocked vault brings it
+  // back on the search field. The helper is stubbed, so the dialog's two
+  // answers are played by calling what the status handler calls.
+  property int handoffStep: 0
+  property var handoffFailures: []
+
+  function handoffFocusIs(item) {
+    var w = widget.popupContentItem ? widget.popupContentItem.Window : null
+    return !!(w && item && w.activeFocusItem === item)
+  }
+
+  function handoffCheck(ok, what) {
+    console.log("UNLOCK-HANDOFF " + (ok ? "ok   " : "FAIL ") + what)
+    if (!ok) harness.handoffFailures = harness.handoffFailures.concat([what])
+  }
+
+  Timer {
+    id: handoffReadyTimer
+    interval: 400
+    onTriggered: {
+      var focused = harness.handoffFocusIs(widget.unlockButtonItem)
+      harness.handoffCheck(focused, "the locked card has the keyboard")
+      if (!focused) {
+        // Never "ready": unlockkey.sh sends Return only after this line, and
+        // a Return sent while something else holds the keyboard lands there.
+        console.log("UNLOCK-HANDOFF result=fail")
+        return
+      }
+      harness.handoffStep = 1
+      console.log("UNLOCK-HANDOFF ready")
+    }
+  }
+
+  Connections {
+    target: widget
+    enabled: harness.state === "locked-handoff"
+    function onPopupOpenChanged() {
+      if (harness.handoffStep === 1 && !widget.popupOpen) {
+        // Checked from the timer, not here: this runs inside close(), before
+        // unlock() has set the flag.
+        harness.handoffStep = 2
+        handoffDismissTimer.running = true
+      } else if (harness.handoffStep === 2 && widget.popupOpen) {
+        harness.handoffStep = 3
+        handoffAfterDismissTimer.running = true
+      } else if (harness.handoffStep === 3 && !widget.popupOpen) {
+        harness.handoffStep = 4
+        handoffUnlockTimer.running = true
+      } else if (harness.handoffStep === 4 && widget.popupOpen) {
+        harness.handoffStep = 5
+        handoffAfterUnlockTimer.running = true
+      }
+    }
+  }
+
+  Timer {
+    id: handoffDismissTimer
+    interval: 400
+    onTriggered: {
+      harness.handoffCheck(widget.resumeAfterUnlock, "Return closed the popup, and it is waiting to come back")
+      widget.unlockDismissed()
+    }
+  }
+
+  Timer {
+    id: handoffAfterDismissTimer
+    interval: 400
+    onTriggered: {
+      harness.handoffCheck(!widget.unlocked && harness.handoffFocusIs(widget.unlockButtonItem),
+        "a cancelled dialog reopens the popup on the locked card")
+      harness.handoffCheck(!widget.resumeAfterUnlock, "a cancelled dialog ends the wait")
+      widget.unlock()
+    }
+  }
+
+  Timer {
+    id: handoffUnlockTimer
+    interval: 400
+    onTriggered: widget.unlocked = true
+  }
+
+  Timer {
+    id: handoffAfterUnlockTimer
+    interval: 400
+    onTriggered: {
+      harness.handoffCheck(widget.unlocked && widget.currentView === "list"
+        && harness.handoffFocusIs(widget.searchInputItem),
+        "an unlocked vault reopens the popup on the search field")
+      console.log("UNLOCK-HANDOFF result=" + (harness.handoffFailures.length === 0 ? "pass" : "fail"))
+    }
   }
 
   // Applied after the widget's own startup churn has settled, so nothing it

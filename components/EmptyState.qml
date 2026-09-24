@@ -37,7 +37,7 @@ ColumnLayout {
   Text {
     visible: !root.loading && root.query.length > 0
     Layout.alignment: Qt.AlignHCenter
-    text: "Try a different search, or make it"
+    text: "Try a different search, or press Enter to make it"
     font.family: root.theme.fontFamily
     font.pixelSize: Style.font.caption
     color: root.theme.dim

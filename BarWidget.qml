@@ -16,6 +16,10 @@ BarWidget {
   property bool popupOpen: false
   function close() {
     popupOpen = false
+    // Closing is an answer too: a popup put away while 1Password is still
+    // asking must not open itself again when the dialog is answered. unlock()
+    // sets the flag after it closes the popup.
+    resumeAfterUnlock = false
     // Drop the decrypted item as soon as the popup goes away; there is no
     // reason for a plaintext password to outlive the view showing it. The
     // form holds the same material once an edit has loaded it.
@@ -102,36 +106,13 @@ BarWidget {
   // hovers, so every action there has a key.
   property int detailIndex: 0
 
-  // The fields that actually get a card. FieldCard hides an empty one, so a
-  // list that still carried it let the selection land on a row that was not
-  // on screen. The Repeater below is bound to this same list rather than to
-  // the raw fields: filtering only one of the two put the focus ring on the
-  // wrong card instead, which is worse than the gap it closed.
-  readonly property var detailFieldCards: {
-    var all = (root.itemDetails && root.itemDetails.fields) ? root.itemDetails.fields : []
-    var out = []
-    for (var i = 0; i < all.length; i++) {
-      var f = all[i]
-      if (f && f.value !== undefined && f.value !== null
-          && String(f.value).trim().length > 0) {
-        out.push(f)
-      }
-    }
-    return out
-  }
-
-  // What the keyboard walks: the cards above, plus the note. The helper
-  // lifts notes out of `fields` into its own key, so navigation skipped them
-  // entirely and on a notes-only item every copy key did nothing. The note
-  // is last, so a card's index here is its index in the Repeater.
-  readonly property var detailFields: {
-    var out = root.detailFieldCards.slice()
-    if (root.itemDetails && root.itemDetails.notes && String(root.itemDetails.notes).trim().length > 0) {
-      out.push({ id: "notes", label: "notes", value: root.itemDetails.notes,
-                 type: "STRING", purpose: "NOTES", concealed: false })
-    }
-    return out
-  }
+  // What the details view lists, in the order the keyboard walks it: the
+  // cards, then each website, then the note. Built in Model.js so it can be
+  // tested; the Repeaters below are bound to the first two lists, so a row's
+  // index on screen and its index here always agree.
+  readonly property var detailFieldCards: Model.detailFieldCards(root.itemDetails)
+  readonly property var detailUrls: Model.detailUrls(root.itemDetails)
+  readonly property var detailFields: Model.detailEntries(root.itemDetails)
 
   readonly property var focusedDetailField: (root.detailIndex >= 0 && root.detailIndex < root.detailFields.length)
     ? root.detailFields[root.detailIndex]
@@ -141,6 +122,13 @@ BarWidget {
   readonly property bool notesFocused: {
     var f = root.focusedDetailField
     return !!(f && f.id === "notes" && f.purpose === "NOTES")
+  }
+
+  // Which website row the keyboard is on, or -1.
+  readonly property int focusedUrlIndex: {
+    var f = root.focusedDetailField
+    if (!f || f.kind !== "url") return -1
+    return root.detailIndex - root.detailFieldCards.length
   }
 
   function moveDetailField(delta) {
@@ -166,6 +154,11 @@ BarWidget {
   function copyFocusedDetailField() {
     var f = root.focusedDetailField
     if (!f) return
+    // An address is not a secret and has no field identity to name.
+    if (f.kind === "url") {
+      root.copyRawValue(f.href, "URL", root.itemDetails ? root.itemDetails.title : "")
+      return
+    }
     root.copyDetailField(f.id, Model.fieldDisplayName(f))
   }
 
@@ -175,7 +168,63 @@ BarWidget {
 
   function typeFocusedDetailField() {
     var f = root.focusedDetailField
-    if (f) root.typeDetailField(f.id, Model.fieldDisplayName(f))
+    if (!f) return
+    if (f.kind === "url") {
+      root.showToast("A website opens with w or copies with c")
+      return
+    }
+    root.typeDetailField(f.id, Model.fieldDisplayName(f))
+  }
+
+  // Enter in the details view. The same chords as the list, so Shift+Enter
+  // and Ctrl+Enter mean one thing everywhere; this is also the only key for
+  // the one-time password's Copy button. A failed load has nothing to copy,
+  // so there Enter is the Retry button.
+  function activateDetail(modifiers) {
+    if (root.detailsError) { root.retryDetails(); return }
+    if (modifiers & Qt.ShiftModifier) root.copyItemQuickField("primary")
+    else if (modifiers & Qt.ControlModifier) root.copyItemQuickField("extra")
+    else if (modifiers & Qt.AltModifier) root.openFocusedOrPrimaryUrl()
+    else root.copyFocusedDetailField()
+  }
+
+  function retryDetails() {
+    if (root.selectedItem) root.showItemDetails(root.selectedItem)
+  }
+
+  function copyItemQuickField(slot) {
+    var it = root.selectedItem
+    if (!it) return
+    var field
+    if (slot === "primary") {
+      field = root.primaryFieldFor(it)
+    } else if (root.itemDetails && root.itemDetails.hasTotp) {
+      // The banner offers a fresh code whenever the item has one, whatever
+      // its category. The category slot would copy a card's security code
+      // under a tooltip that promised the code.
+      field = "otp"
+    } else {
+      field = Model.quickFieldsFor(it).extra
+    }
+    if (!field) {
+      root.showToast("No second factor on this item")
+      return
+    }
+    root.copyField(it.id, field, it.title)
+  }
+
+  // The focused website if there is one, otherwise the primary: the address
+  // op writes, which is not always the first one listed.
+  function openFocusedOrPrimaryUrl() {
+    var f = root.focusedDetailField
+    var url = (f && f.kind === "url") ? f.href : root.primaryUrlOf(root.itemDetails)
+    if (url) root.openUrl(url)
+    else root.showToast("This item has no website")
+  }
+
+  function openItemInDesktop() {
+    var id = (root.itemDetails && root.itemDetails.id) || (root.selectedItem && root.selectedItem.id)
+    if (id) root.openDesktop(id)
   }
 
   // Reveal is per focused field rather than per card: it resets as soon as the
@@ -219,6 +268,26 @@ BarWidget {
     root.showItemDetails(root.currentItem)
   }
 
+  // Enter on a list with nothing in it does what the empty state's button
+  // does: create the thing that was searched for.
+  function enterCurrent() {
+    if (root.currentItem) root.activateCurrent()
+    else if (root.items.length === 0 && !root.searching) root.startCreate(root.searchQuery)
+  }
+
+  // The list header's buttons, from the search field. Alt, because every
+  // plain letter belongs to the query and Ctrl is taken by the readline keys.
+  function handleListActionChord(event) {
+    if (!root.unlocked) return false
+    if ((event.modifiers & (Qt.AltModifier | Qt.ControlModifier | Qt.MetaModifier)) !== Qt.AltModifier) return false
+    switch (event.key) {
+    case Qt.Key_N: root.startCreate(root.searchQuery); return true
+    case Qt.Key_S: root.syncVault(); return true
+    case Qt.Key_L: root.lockVault(); return true
+    }
+    return false
+  }
+
   function copyPrimary() {
     var it = root.currentItem
     if (!it) return
@@ -253,16 +322,16 @@ BarWidget {
     switch (event.key) {
     case Qt.Key_N: inDetails ? root.moveDetailField(1) : root.moveSelection(1); return true
     case Qt.Key_P: inDetails ? root.moveDetailField(-1) : root.moveSelection(-1); return true
-    case Qt.Key_F: inDetails ? root.copyFocusedDetailField() : root.activateCurrent(); return true
+    case Qt.Key_F: inDetails ? root.activateDetail(0) : root.activateCurrent(); return true
     case Qt.Key_B: inDetails ? root.backToList() : root.close(); return true
-    case Qt.Key_M: inDetails ? root.copyFocusedDetailField() : root.activateCurrent(); return true
+    case Qt.Key_M: inDetails ? root.activateDetail(0) : root.enterCurrent(); return true
     case Qt.Key_BracketLeft: inDetails ? root.backToList() : root.close(); return true
     }
     return false
   }
 
   readonly property string listHint: {
-    if (root.items.length === 0) return ""
+    if (root.items.length === 0) return root.searching ? "" : "\u21b5 Create"
     var f = root.currentFields
     var parts = ["\u21b5 Details"]
     var primary = root.primaryFieldFor(root.currentItem)
@@ -419,6 +488,7 @@ BarWidget {
           root.installed = resp.installed !== false
           var wasUnlocked = root.unlocked
           root.unlocked = !!resp.unlocked
+          if (resp.dismissed && !root.unlocked) root.unlockDismissed()
           if (wasUnlocked && !root.unlocked) {
             // Seeing the vault lock has to drop what is on screen, not merely
             // hide it: otherwise unlocking again redisplays the previous item,
@@ -440,6 +510,14 @@ BarWidget {
             syncSettleTimer.restart()
           }
         } catch (e) {}
+        // The wait for an unlock ends with the last check's verdict, whatever
+        // it was. Once polling is over and no unlock is still queued, a reply
+        // that is not "unlocked" (a lock, a helper error, no output at all)
+        // has to drop the flag, or some later unlock would open the popup
+        // unasked. Outside the try, so a reply that cannot be parsed counts.
+        if (!root.unlocked && !unlockPollTimer.running && !root.unlockActionPending) {
+          root.resumeAfterUnlock = false
+        }
       }
     }
     onExited: function(exitCode) {
@@ -802,6 +880,8 @@ BarWidget {
   // enumeration is the only way to check it.
   readonly property Item createFormItem: createForm
   readonly property Item popupContentItem: popupContent
+  readonly property Item searchInputItem: searchInput
+  readonly property Item unlockButtonItem: lockedColumn.unlockButton
 
   // Editing reuses the create form: the same spec decides which fields are
   // shown. The helper preserves everything the form does not show, so a
@@ -1119,10 +1199,51 @@ BarWidget {
     root.pumpActions()
   }
 
+  // Unlocking closes the popup until 1Password's dialog is answered. The
+  // panel is a full-screen overlay holding keyboard focus, so while it stayed
+  // open the dialog could not be typed into, and the first click on
+  // Authorize only dismissed the popup. It comes back by itself: on the
+  // search field once the vault opens, or on the locked card if the dialog is
+  // cancelled.
+  property bool resumeAfterUnlock: false
+
+  // An unlock asked for but not yet answered by the helper: running, or still
+  // queued behind a slower action. The poll deadline must not end the wait
+  // while this is true, since the forced check that matters has not run yet.
+  readonly property bool unlockActionPending: {
+    if (root.runningAction && root.runningAction.payload.action === "unlock") return true
+    for (var i = 0; i < root.actionQueue.length; i++) {
+      if (root.actionQueue[i].payload.action === "unlock") return true
+    }
+    return false
+  }
+
   function unlock() {
     runAction({ action: "unlock" })
     unlockPollTimer.attempts = 0
     unlockPollTimer.running = true
+    root.close()
+    root.resumeAfterUnlock = true
+  }
+
+  // Polling on after a cancel raised the dialog again two seconds later, so
+  // a cancel could not be made to stick.
+  function unlockDismissed() {
+    unlockPollTimer.running = false
+    unlockPollTimer.attempts = 0
+    if (!root.resumeAfterUnlock) return
+    root.resumeAfterUnlock = false
+    root.open()
+  }
+
+  Connections {
+    target: root
+    function onUnlockedChanged() {
+      if (root.unlocked && root.resumeAfterUnlock) {
+        root.resumeAfterUnlock = false
+        root.open()
+      }
+    }
   }
 
   function lockVault() {
@@ -1249,9 +1370,14 @@ BarWidget {
     property int attempts: 0
     onTriggered: {
       attempts++
-      if (root.unlocked || attempts >= 8 || !root.popupOpen) {
+      // Not stopped by the popup closing when unlock() closed it on purpose.
+      if (root.unlocked || attempts >= 8 || (!root.popupOpen && !root.resumeAfterUnlock)) {
         running = false
         attempts = 0
+        // A check still waiting on the dialog decides for itself, and so
+        // does an unlock still queued behind another action: approving it
+        // after the last tick still has to bring the popup back.
+        if (!statusProc.running && !root.unlockActionPending) root.resumeAfterUnlock = false
       } else {
         root.checkStatus(true)
       }
@@ -1383,7 +1509,7 @@ BarWidget {
         Button {
           visible: root.unlocked
           iconText: "\u{f0415}"
-          tooltipText: "New login"
+          tooltipText: "New login (Alt+N)"
           accent: root.colAccent
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(4)
@@ -1396,7 +1522,7 @@ BarWidget {
           // A vault sync is a network round trip; without this the button
           // looks inert until the toast arrives seconds later.
           iconText: root.busy ? "󰔟" : "󰑐"
-          tooltipText: root.busy ? "Working..." : "Sync vault"
+          tooltipText: root.busy ? "Working..." : "Sync vault (Alt+S)"
           accent: root.colAccent
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(4)
@@ -1407,7 +1533,7 @@ BarWidget {
         Button {
           visible: root.unlocked
           iconText: ""
-          tooltipText: "Lock vault"
+          tooltipText: "Lock vault (Alt+L)"
           accent: root.colAccent
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(4)
@@ -1519,14 +1645,11 @@ BarWidget {
 
         Button {
           iconText: "󱔐"
-          tooltipText: "Open in 1Password desktop app"
+          tooltipText: "Open in 1Password desktop app (o)"
           accent: root.colAccent
           horizontalPadding: Style.space(6)
           verticalPadding: Style.space(4)
-          onClicked: {
-            var id = (root.itemDetails && root.itemDetails.id) || (root.selectedItem && root.selectedItem.id)
-            if (id) root.openDesktop(id)
-          }
+          onClicked: root.openItemInDesktop()
         }
       }
 
@@ -1592,7 +1715,7 @@ BarWidget {
               // Chords and navigation keys are taken before the input sees
               // them; anything not claimed here still types normally.
               Keys.onPressed: function(event) {
-                if (root.handleReadlineChord(event, false)) {
+                if (root.handleReadlineChord(event, false) || root.handleListActionChord(event)) {
                   event.accepted = true
                   return
                 }
@@ -1645,13 +1768,13 @@ BarWidget {
                 if (event.modifiers & Qt.ShiftModifier) root.copyPrimary()
                 else if (event.modifiers & Qt.ControlModifier) root.copyExtra()
                 else if (event.modifiers & Qt.AltModifier) root.openCurrentUrl()
-                else root.activateCurrent()
+                else root.enterCurrent()
               }
               Keys.onEnterPressed: function(event) {
                 if (event.modifiers & Qt.ShiftModifier) root.copyPrimary()
                 else if (event.modifiers & Qt.ControlModifier) root.copyExtra()
                 else if (event.modifiers & Qt.AltModifier) root.openCurrentUrl()
-                else root.activateCurrent()
+                else root.enterCurrent()
               }
             }
 
@@ -2082,8 +2205,8 @@ BarWidget {
         Keys.onLeftPressed: if (!deleteConfirm.opened) root.backToList()
         Keys.onDownPressed: if (!deleteConfirm.opened) root.moveDetailField(1)
         Keys.onUpPressed: if (!deleteConfirm.opened) root.moveDetailField(-1)
-        Keys.onReturnPressed: if (!deleteConfirm.opened) root.copyFocusedDetailField()
-        Keys.onEnterPressed: if (!deleteConfirm.opened) root.copyFocusedDetailField()
+        Keys.onReturnPressed: function(event) { if (!deleteConfirm.opened) root.activateDetail(event.modifiers) }
+        Keys.onEnterPressed: function(event) { if (!deleteConfirm.opened) root.activateDetail(event.modifiers) }
         Keys.onPressed: function(event) {
           // While the confirmation is up it owns the keyboard, or Escape and
           // Enter would act on the item behind it.
@@ -2099,12 +2222,8 @@ BarWidget {
           case Qt.Key_R: root.revealFocusedDetailField(); event.accepted = true; break
           case Qt.Key_T: root.typeFocusedDetailField(); event.accepted = true; break
           case Qt.Key_C: root.copyFocusedDetailField(); event.accepted = true; break
-          case Qt.Key_W:
-            if (root.itemDetails && root.itemDetails.urls && root.itemDetails.urls.length > 0) {
-              root.openUrl(root.itemDetails.urls[0].href)
-            }
-            event.accepted = true
-            break
+          case Qt.Key_W: root.openFocusedOrPrimaryUrl(); event.accepted = true; break
+          case Qt.Key_O: root.openItemInDesktop(); event.accepted = true; break
           case Qt.Key_E: root.startEdit(); event.accepted = true; break
           case Qt.Key_Delete: root.askDelete(); event.accepted = true; break
           case Qt.Key_Home: root.detailIndex = 0; event.accepted = true; break
@@ -2180,6 +2299,7 @@ BarWidget {
           Button {
             Layout.alignment: Qt.AlignHCenter
             text: "Retry"
+            tooltipText: "Retry (Enter)"
             iconText: "󰑐"
             accent: root.colAccent
             onClicked: {
@@ -2261,6 +2381,7 @@ BarWidget {
                 Button {
                   iconText: "󰆏"
                   text: "Copy"
+                  tooltipText: "Copy a fresh code (Ctrl+Enter)"
                   accent: root.colAccent
                   horizontalPadding: Style.space(10)
                   verticalPadding: Style.space(4)
@@ -2309,7 +2430,7 @@ BarWidget {
 
             // Websites Repeater
             Repeater {
-              model: (root.itemDetails && root.itemDetails.urls) ? root.itemDetails.urls : []
+              model: root.detailUrls
               delegate: BorderSurface {
                 required property var modelData
                 required property int index
@@ -2318,8 +2439,13 @@ BarWidget {
                 Layout.fillWidth: true
                 Layout.preferredHeight: visible ? Style.space(42) : 0
                 radius: Style.cornerRadius
-                color: Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
-                borderSpec: Border.controlSpec("normal", root.colForeground, root.colAccent)
+                // In the keyboard walk, after the field cards.
+                readonly property bool focused: root.focusedUrlIndex === index
+                onFocusedChanged: if (focused) root.ensureDetailVisible(y, height)
+                color: focused
+                  ? Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.08)
+                  : Qt.rgba(root.colForeground.r, root.colForeground.g, root.colForeground.b, 0.04)
+                borderSpec: Border.controlSpec(focused ? "focus" : "normal", root.colForeground, root.colAccent)
 
                 RowLayout {
                   anchors.fill: parent
@@ -2345,7 +2471,7 @@ BarWidget {
 
                   Button {
                     iconText: "󰆏"
-                    tooltipText: "Copy URL"
+                    tooltipText: "Copy URL (c)"
                     accent: root.colAccent
                     horizontalPadding: Style.space(6)
                     verticalPadding: Style.space(4)
@@ -2354,7 +2480,7 @@ BarWidget {
 
                   Button {
                     iconText: "󰌹"
-                    tooltipText: "Open in Browser"
+                    tooltipText: "Open in Browser (w)"
                     accent: root.colAccent
                     horizontalPadding: Style.space(6)
                     verticalPadding: Style.space(4)
@@ -2401,6 +2527,7 @@ BarWidget {
                   Button {
                     iconText: "󰆏"
                     text: "Copy Notes"
+                    tooltipText: "Copy the note (c)"
                     accent: root.colAccent
                     horizontalPadding: Style.space(6)
                     verticalPadding: Style.space(2)

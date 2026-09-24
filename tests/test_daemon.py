@@ -185,6 +185,32 @@ class TestVersionHandshake(IsolatedRuntimeDir):
             [r for r in sent if r.get("action") == "edit_item"], [],
             "an edit reached a daemon running different code")
 
+    def test_a_forced_status_outlasts_the_op_commands_it_runs(self):
+        """An answer to the dialog has to reach the widget, not a client timeout.
+
+        With the general 10s budget, a cancel or an approval given after 10s
+        of op's 12s window came back as "Request timed out"."""
+        budgets = {}
+
+        def request(req, timeout=15.0):
+            if req.get("action") == "ping":
+                return self._pong(build=daemon.build_id())
+            budgets[(req.get("action"), bool(req.get("force")))] = timeout
+            return {"ok": True}
+
+        with patch.object(daemon, "send_socket_request", side_effect=request):
+            with patch("subprocess.Popen"):
+                with patch("time.sleep"):
+                    with patch.object(daemon, "OmaPassService") as svc:
+                        with patch("builtins.print"):
+                            daemon.handle_request({"action": "status", "force": True})
+                            daemon.handle_request({"action": "status"})
+
+        svc.return_value.dispatch.assert_not_called()
+        self.assertGreater(budgets[("status", True)],
+                           daemon.STATUS_OP_TIMEOUT + daemon.STATUS_FALLBACK_TIMEOUT)
+        self.assertEqual(budgets[("status", False)], 10.0)
+
     def test_a_daemon_running_other_code_is_stopped(self):
         with patch.object(daemon, "send_socket_request",
                           return_value=self._pong(build="a-different-build")):

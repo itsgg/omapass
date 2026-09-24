@@ -11,6 +11,9 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 WORK="${XDG_CACHE_HOME:-$HOME/.cache}/omapass-audit"
 LOG="$WORK/shots/tab-key-note.log"
 
+# A log left by the last run would satisfy the readiness check below before
+# this run's harness had even started.
+rm -f "$LOG"
 OMAPASS_AUDIT_HOLD=6 "$HERE/shoot.sh" tab-key-note >/dev/null 2>&1 &
 shoot_pid=$!
 
@@ -37,4 +40,9 @@ wtype ${WT_MOD:+-M shift} -k "${1:-Tab}"
 sleep 0.3
 wtype "MARK"
 wait "$shoot_pid" 2>/dev/null
-sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep "TAB-KEY"
+shot_status=$?
+out="$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep "TAB-KEY")"
+printf '%s\n' "$out"
+# Printing the report was the whole result, so a Tab that stayed in the note
+# still exited 0.
+[ "$shot_status" = 0 ] && grep -q "movedOffNote=true" <<<"$out"

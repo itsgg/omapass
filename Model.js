@@ -117,6 +117,59 @@ function quickFieldList(item) {
   return out;
 }
 
+// ------------------------------------------------------------ Details rows
+//
+// What the details view lists, in the order the keyboard walks it.
+
+// The fields that actually get a card. FieldCard hides an empty one, so a
+// list that still carried it let the selection land on a row that was not on
+// screen. The widget binds its Repeater to this same list rather than to the
+// raw fields: filtering only one of the two put the focus ring on the wrong
+// card instead, which is worse than the gap it closed.
+function detailFieldCards(details) {
+  var all = (details && details.fields) ? details.fields : [];
+  var out = [];
+  for (var i = 0; i < all.length; i++) {
+    var f = all[i];
+    if (f && f.value !== undefined && f.value !== null
+        && String(f.value).trim().length > 0) {
+      out.push(f);
+    }
+  }
+  return out;
+}
+
+// Websites with an address, filtered for the same reason as the cards: a
+// row's index on screen has to be its index here.
+function detailUrls(details) {
+  var all = (details && details.urls) ? details.urls : [];
+  var out = [];
+  for (var i = 0; i < all.length; i++) {
+    var u = all[i];
+    if (u && u.href && String(u.href).trim().length > 0) out.push(u);
+  }
+  return out;
+}
+
+// What the keyboard walks: the cards, then each website, then the note. The
+// helper lifts notes out of `fields` into their own key, so navigation once
+// skipped them and on a notes-only item every copy key did nothing. Websites
+// were skipped the same way, which left every address after the first with
+// buttons only a mouse could reach. The order is the screen's order.
+function detailEntries(details) {
+  var out = detailFieldCards(details).slice();
+  var urls = detailUrls(details);
+  for (var i = 0; i < urls.length; i++) {
+    out.push({ kind: "url", id: "url:" + i, label: "website", value: urls[i].href,
+               href: urls[i].href, type: "URL", purpose: "", concealed: false });
+  }
+  if (details && details.notes && String(details.notes).trim().length > 0) {
+    out.push({ kind: "notes", id: "notes", label: "notes", value: details.notes,
+               type: "STRING", purpose: "NOTES", concealed: false });
+  }
+  return out;
+}
+
 var FIELD_META = {
   password:   { icon: "\u{f0306}", label: "Password" },
   username:   { icon: "\u{f02fd}", label: "Username" },

@@ -122,3 +122,18 @@ DEFAULT_PASSWORD_RECIPE = "letters,digits,symbols,32"
 PASSWORD_RECIPE_RE = re.compile(
     r"^(letters|digits|symbols)(,(letters|digits|symbols))*(,\d{1,3})?$|^\d{1,3}$"
 )
+
+
+# What op prints when its authorization dialog is cancelled. Only used to tell
+# the widget to stop asking, since asking again raises the dialog again two
+# seconds later. The revocation never depends on it, so if op changes its
+# wording the cost is a repeated prompt, not a wrong verdict.
+PROMPT_DISMISSED_RE = re.compile(r"prompt dismissed", re.IGNORECASE)
+
+# How long a forced status check gives each op command. The first is the one
+# that raises 1Password's authorization dialog, so it is also how long the
+# user has to answer it. The client's budget for the request is derived from
+# these: a shorter one gave up while op was still waiting, so an answer given
+# late in the window arrived as a timeout, losing both a cancel and an approval.
+STATUS_OP_TIMEOUT = 12.0
+STATUS_FALLBACK_TIMEOUT = 4.0

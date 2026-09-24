@@ -28,6 +28,9 @@ from .clipboard import (
     wipe_clipboard_now,
 )
 from .config import (
+    STATUS_FALLBACK_TIMEOUT,
+    STATUS_OP_TIMEOUT,
+    PROMPT_DISMISSED_RE,
     AUTH_ERROR_MARKERS,
     build_id,
     PROTOCOL_VERSION,
@@ -330,16 +333,22 @@ class OmaPassService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=12.0,
+                timeout=STATUS_OP_TIMEOUT,
             )
-            # Fallback for standalone CLI session tokens
-            if res.returncode != 0:
+            # Read before the fallback replaces `res`: only this command can
+            # have raised the dialog the user just answered.
+            prompt_error = res.stderr if isinstance(res.stderr, str) else ""
+            dismissed = bool(PROMPT_DISMISSED_RE.search(prompt_error))
+            # Fallback for standalone CLI session tokens. Not after a
+            # dismissal: the verdict is in, and a fallback that timed out
+            # reported the cancel as a timeout, which raised the dialog again.
+            if res.returncode != 0 and not dismissed:
                 res = subprocess.run(
                     ["op", "whoami", "--format=json"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=4.0,
+                    timeout=STATUS_FALLBACK_TIMEOUT,
                 )
 
             if res.returncode == 0:
@@ -407,6 +416,7 @@ class OmaPassService:
                         "itemCount": len(self.items),
                         "lastSync": self.last_sync_time,
                         "message": "Vault is locked or unauthorized.",
+                        "dismissed": dismissed,
                     }
         except subprocess.TimeoutExpired:
             with self.lock:

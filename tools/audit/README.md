@@ -21,6 +21,12 @@ Two deviations in the copy it renders, both deliberate:
   with the live vault the moment the popup opens.
 - Fixtures are synthetic. Nothing here reads a real 1Password item.
 
+`unlockkey.sh` sends a real Return to the locked card and follows the unlock
+handoff: the popup has to close so 1Password's dialog can take the keyboard,
+reopen on the locked card when the dialog is cancelled, and reopen on the
+search field once the vault opens. The dialog's answers are played by the
+harness, since the helper is stubbed.
+
 `tabkey.sh` sends a real Tab to the note editor and reports where focus went.
 The focus chain below is a static graph and cannot see a widget that accepts
 Tab as text: enabling `activeFocusOnTab` on the bare `TextEdit` made the note
@@ -44,10 +50,11 @@ refreshing them was a manual render and crop: the details header gained an
 edit and an archive button and the list header gained a create button, and
 the README kept showing the version before all three.
 
-States: `locked`, `locked-long`, `locked-none`, `list`, `long`, `many`,
+States: `locked`, `locked-long`, `locked-none`, `locked-handoff` (driven by
+`unlockkey.sh`), `list`, `long`, `many`,
 `empty`, `no-results`, `toast`, `details`, `details-totp`, `details-totp60`,
 `details-legacy`, `details-card`, `details-notes`, `details-many`,
-`details-error`, `details-loading`, `details-edit`, `details-edit-note`,
+`details-error`, `details-loading`, `details-url-focus`, `details-edit`, `details-edit-note`,
 `details-delete`, `create`, `create-card`, `create-note`, `create-empty`,
 the `demo-*` states used to render the screenshots in the README (including
 `demo-create`, `demo-edit` and `demo-archive`, cropped to 657x707 to match the

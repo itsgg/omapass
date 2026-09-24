@@ -113,6 +113,18 @@ Everything is reachable without the mouse. The readline chords match the ones
 this machine adds to Omarchy's own popups, so <kbd>Ctrl</kbd>+<kbd>N</kbd>
 means the same thing here as in the app menu.
 
+### Locked
+
+| Key | Action |
+| --- | --- |
+| <kbd>Enter</kbd> / <kbd>Space</kbd> | Unlock |
+| <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>[</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd> | Close |
+
+Unlocking hands the keyboard to 1Password. The popup closes while the desktop
+app's authorization dialog is up, so the dialog can take <kbd>Enter</kbd> or a
+fingerprint, and then it opens again by itself: on the search field once the
+vault is open, or back on the locked card if you cancel.
+
 ### List
 
 | Key | Action |
@@ -122,9 +134,13 @@ means the same thing here as in the app menu.
 | <kbd>Ctrl</kbd>+<kbd>Home</kbd> / <kbd>Ctrl</kbd>+<kbd>End</kbd> | First / last item |
 | <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Cycle the category chips |
 | <kbd>Enter</kbd> / <kbd>→</kbd> / <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>M</kbd> | Open details |
+| <kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>M</kbd>, when nothing matches | Create a login titled with the query |
 | <kbd>Shift</kbd>+<kbd>Enter</kbd> | Copy the primary secret (password, or card number) |
 | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Copy the second factor (TOTP, or CVV) |
 | <kbd>Alt</kbd>+<kbd>Enter</kbd> | Open the website |
+| <kbd>Alt</kbd>+<kbd>N</kbd> | New login, titled with the query |
+| <kbd>Alt</kbd>+<kbd>S</kbd> | Sync the vault |
+| <kbd>Alt</kbd>+<kbd>L</kbd> | Lock the vault |
 | <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>[</kbd> | Clear the query, then close |
 | anything else | Types into the search field |
 
@@ -135,11 +151,18 @@ button copy, but only where the item actually has that field.
 
 | Key | Action |
 | --- | --- |
-| <kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Ctrl</kbd>+<kbd>P</kbd> <kbd>Ctrl</kbd>+<kbd>N</kbd> | Move between fields |
-| <kbd>Enter</kbd> / <kbd>c</kbd> / <kbd>Ctrl</kbd>+<kbd>F</kbd> | Copy the focused field |
+| <kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Ctrl</kbd>+<kbd>P</kbd> <kbd>Ctrl</kbd>+<kbd>N</kbd> | Move between fields, websites and the note |
+| <kbd>Home</kbd> / <kbd>End</kbd> | First / last of those |
+| <kbd>Enter</kbd> / <kbd>c</kbd> / <kbd>Ctrl</kbd>+<kbd>F</kbd> | Copy the focused field, website or note |
+| <kbd>Shift</kbd>+<kbd>Enter</kbd> | Copy the primary secret (password, or card number) |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Copy the second factor (a fresh TOTP, or CVV) |
 | <kbd>r</kbd> | Reveal / conceal the focused field |
 | <kbd>t</kbd> | Auto-type the focused field into the last window |
-| <kbd>w</kbd> | Open the item's website |
+| <kbd>w</kbd> / <kbd>Alt</kbd>+<kbd>Enter</kbd> | Open the focused website, or the primary one |
+| <kbd>o</kbd> | Open the item in the 1Password app |
+| <kbd>e</kbd> | Edit the item |
+| <kbd>Del</kbd> | Archive the item, after asking |
+| <kbd>Enter</kbd>, when the item failed to load | Retry |
 | <kbd>←</kbd> / <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd> | Back to the list |
 
 In the create and edit form:
@@ -159,7 +182,8 @@ the vault: 1Password cannot change either after the fact.
 Tab cannot reach is a visible regression rather than something found by
 tabbing around, and `tools/audit/tabkey.sh` sends a real Tab to the note
 editor, which is the only way to catch a field that Tab can enter but not
-leave.
+leave. `tools/audit/unlockkey.sh` sends a real Return to the locked card and
+follows the popup out of 1Password's way and back.
 
 Revealing follows the focused field: move off it and it re-conceals.
 
@@ -311,8 +335,10 @@ The helper script `omapass-agent.py` can also be called directly:
 `status` answers from the cache, or from `op account list`, which does not
 prompt. It never runs a command that can block on the desktop app's
 authorization dialog. Pass `{"action": "status", "force": true}` to actually
-ask `op` and accept that prompt, which is what the widget does after you click
-**Unlock**.
+ask `op` and accept that prompt, which is what the widget does after you press
+**Unlock Vault**. When that prompt is cancelled the answer carries
+`"dismissed": true`, and the widget stops asking rather than raising the
+dialog again.
 
 ## Layout
 

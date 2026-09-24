@@ -28,6 +28,7 @@ from .paths import (
     write_private,
     startup_lock_path,
 )
+from .config import STATUS_FALLBACK_TIMEOUT, STATUS_OP_TIMEOUT
 from .service import OmaPassService
 
 def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optional[Dict[str, Any]]:
@@ -324,6 +325,16 @@ def run_daemon(install_signals: bool = True, on_ready=None):
             conn.close()
 
 
+def forced_status_timeout() -> float:
+    """Outlasts both op commands a forced status can run.
+
+    A forced status blocks on 1Password's authorization dialog. The general
+    10s budget ran out before op did, so a cancel or an approval given late in
+    op's window reached the widget as a timeout instead.
+    """
+    return STATUS_OP_TIMEOUT + STATUS_FALLBACK_TIMEOUT + 4.0
+
+
 def handle_request(req: Dict[str, Any]):
     """Dispatches request via daemon socket, auto-starting daemon if needed, with structured error handling."""
     try:
@@ -337,6 +348,8 @@ def handle_request(req: Dict[str, Any]):
             timeout = 90.0
         elif action in ("sync", "get_item", "unlock", "copy", "type"):
             timeout = 40.0
+        elif action == "status" and req.get("force"):
+            timeout = forced_status_timeout()
         else:
             timeout = 10.0
         if not ours:

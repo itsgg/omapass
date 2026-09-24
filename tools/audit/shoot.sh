@@ -37,13 +37,23 @@ trap 'kill "$qs_pid" 2>/dev/null; wait "$qs_pid" 2>/dev/null' EXIT
 # Wait for the harness surface to actually map. Without this, a quickshell
 # that failed to launch means grim photographs the desktop instead, and the
 # result looks like a screenshot of the widget to everything downstream.
+# The popup's own layer, and this instance's: the fake bar maps first, and a
+# capture once came back as the desktop with only that bar waited for. The
+# popup is a full-screen overlay that closes on any click, so on a desktop in
+# use it can also be gone again by the time of the capture below.
+popup_mapped() {
+  grep -qE "namespace: omarchy-keyboard-panel, pid: ${qs_pid}([^0-9]|\$)" <<<"$1"
+}
 mapped=0
 for _ in $(seq 1 80); do
-  if hyprctl layers 2>/dev/null | grep -q "omapass-audit"; then mapped=1; break; fi
+  layers="$(hyprctl layers 2>/dev/null)"
+  if grep -q "namespace: omapass-audit," <<<"$layers" && popup_mapped "$layers"; then
+    mapped=1; break
+  fi
   sleep 0.1
 done
 if [ "$mapped" != 1 ]; then
-  echo "harness surface never mapped for '$state'; see $SHOTS/$state.log" >&2
+  echo "harness popup never mapped for '$state'; see $SHOTS/$state.log" >&2
   kill "$qs_pid" 2>/dev/null
   wait "$qs_pid" 2>/dev/null
   exit 1
@@ -56,7 +66,7 @@ sleep "${OMAPASS_AUDIT_HOLD:-3.0}"
 # is the fake bar, and quickshell can still die while the popup is being
 # built: the layers go with it, and grim would then photograph whatever the
 # desktop happens to be showing and hand it back as a picture of the widget.
-if ! kill -0 "$qs_pid" 2>/dev/null    || ! hyprctl layers 2>/dev/null | grep -q "omapass-audit"; then
+if ! kill -0 "$qs_pid" 2>/dev/null || ! popup_mapped "$(hyprctl layers 2>/dev/null)"; then
   echo "harness died before '$state' could be captured; see $SHOTS/$state.log" >&2
   kill "$qs_pid" 2>/dev/null
   wait "$qs_pid" 2>/dev/null
