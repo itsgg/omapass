@@ -16,6 +16,7 @@ BarWidget {
   property bool popupOpen: false
   function close() {
     popupOpen = false
+    enterPending = false
     // Closing is an answer too: a popup put away while 1Password is still
     // asking must not open itself again when the dialog is answered. unlock()
     // sets the flag after it closes the popup.
@@ -268,11 +269,26 @@ BarWidget {
     root.showItemDetails(root.currentItem)
   }
 
+  // Enter pressed while the list on screen still belongs to an older query:
+  // the debounce has not fired, or the search is in flight. Kept and acted
+  // on when the reply for the current query lands, so the keystroke is not
+  // lost and it never opens details, or the create form, off a stale list.
+  property bool enterPending: false
+
   // Enter on a list with nothing in it does what the empty state's button
   // does: create the thing that was searched for.
   function enterCurrent() {
+    if (searchTimer.running || root.searching) {
+      root.enterPending = true
+      if (searchTimer.running) {
+        searchTimer.stop()
+        root.refreshItems()
+      }
+      return
+    }
+    root.enterPending = false
     if (root.currentItem) root.activateCurrent()
-    else if (root.items.length === 0 && !root.searching) root.startCreate(root.searchQuery)
+    else if (root.items.length === 0 && !root.vaultSyncing) root.startCreate(root.searchQuery)
   }
 
   // The list header's buttons, from the search field. Alt, because every
@@ -331,7 +347,7 @@ BarWidget {
   }
 
   readonly property string listHint: {
-    if (root.items.length === 0) return root.searching ? "" : "\u21b5 Create"
+    if (root.items.length === 0) return (root.searching || root.vaultSyncing || searchTimer.running) ? "" : "\u21b5 Create"
     var f = root.currentFields
     var parts = ["\u21b5 Details"]
     var primary = root.primaryFieldFor(root.currentItem)
@@ -348,6 +364,10 @@ BarWidget {
   property int itemCount: 0
   property bool busy: false
   property bool searching: false
+  // The helper is still filling the list from 1Password. An empty answer
+  // while this is set is not "no items in vault", and Enter must not offer
+  // to create one.
+  property bool vaultSyncing: false
 
   // View state: "list", "details" or "create"
   property string currentView: "list"
@@ -542,13 +562,10 @@ BarWidget {
           root.account = resp.account || resp.name || ""
           if (resp.itemCount !== undefined) root.itemCount = resp.itemCount
           if (!wasUnlocked && root.unlocked) {
-            root.refreshItems()
             // The helper answers a forced status as soon as it knows the vault
-            // is open, and syncs the item list in the background. Refreshing
-            // once here can land before that sync finishes and leave the user
-            // looking at "No items in vault" until they touch something.
-            syncSettleTimer.attempts = 0
-            syncSettleTimer.restart()
+            // is open and syncs the list in the background; the list reply
+            // says so, and keeps syncSettleTimer asking until it is done.
+            root.refreshItems()
           }
         } catch (e) {}
         // The wait for an unlock ends with the last check's verdict, whatever
@@ -580,6 +597,10 @@ BarWidget {
     // Set when a query arrives while a search is already in flight, so the
     // last keystroke is never the one that gets dropped.
     property bool pending: false
+    // Whether the reply carried a list. One that did not (an error, no
+    // output, a helper that died) cannot say a sync is running, and leaving
+    // vaultSyncing set on it kept "Loading vault..." up for ever.
+    property bool answered: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -589,8 +610,13 @@ BarWidget {
           // view afterwards; the locked card is meant to show nothing.
           if (!root.unlocked) return
           if (resp.ok && resp.items) {
+            searchProc.answered = true
             root.items = resp.items
             if (resp.totalItems !== undefined) root.itemCount = resp.totalItems
+            // The helper says when a sync is still running; that sync has no
+            // way to notify us, so the list is asked again until it is done.
+            root.vaultSyncing = !!resp.syncing
+            if (root.vaultSyncing && root.popupOpen) syncSettleTimer.restart()
             if (root.selectedIndex >= root.items.length) {
               root.selectedIndex = Math.max(0, root.items.length - 1)
             }
@@ -604,10 +630,15 @@ BarWidget {
     property bool exitSeen: false
     function finish() {
       root.searching = false
+      if (!searchProc.answered) root.vaultSyncing = false
       if (searchProc.pending) {
         searchProc.pending = false
         Qt.callLater(root.refreshItems)
+        return
       }
+      // The list now matches the query; an Enter that arrived before it
+      // did gets its turn.
+      if (root.enterPending && !searchTimer.running) Qt.callLater(root.enterCurrent)
     }
     onExited: {
       searchProc.exitSeen = true
@@ -631,6 +662,7 @@ BarWidget {
     }
     root.searching = true
     searchProc.exitSeen = false
+    searchProc.answered = false
     searchProc.generation++
     root.runHelper(searchProc, {
       action: "list",
@@ -1372,6 +1404,8 @@ BarWidget {
 
   onSearchQueryChanged: {
     selectedIndex = 0
+    // An Enter waiting on the previous query was for that query.
+    enterPending = false
     searchTimer.restart()
   }
 
@@ -1387,24 +1421,17 @@ BarWidget {
     onTriggered: root.refreshItems()
   }
 
-  // Re-checks the list for a short while after unlocking, because the first
-  // sync completes asynchronously and has no way to notify us.
+  // Asks for the list again while the helper reports a sync in flight. One
+  // shot per reply: the reply that still says "syncing" restarts it, the one
+  // that does not ends the wait, so it runs exactly as long as the sync and
+  // never on a vault that is simply empty.
   Timer {
     id: syncSettleTimer
     interval: 1200
-    repeat: true
+    repeat: false
     running: false
-    property int attempts: 0
     onTriggered: {
-      attempts++
-      // The helper allows a 30s sync. Stopping at 26 ticks put the last
-      // request at exactly 30s, racing the completion it was waiting for;
-      // 32 ticks keeps polling a few seconds past it.
-      if (!root.popupOpen || !root.unlocked || root.items.length > 0 || attempts >= 32) {
-        running = false
-        attempts = 0
-        return
-      }
+      if (!root.popupOpen || !root.unlocked || !root.vaultSyncing) return
       root.refreshItems()
     }
   }
@@ -2119,7 +2146,7 @@ BarWidget {
             anchors.centerIn: parent
             visible: root.items.length === 0
             theme: appTheme
-            loading: root.searching
+            loading: root.searching || root.vaultSyncing
             query: root.searchQuery
             onCreateRequested: function(title) { root.startCreate(title) }
           }

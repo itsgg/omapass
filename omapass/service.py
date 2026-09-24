@@ -85,6 +85,11 @@ class OmaPassService:
         self.items: List[Dict[str, Any]] = []
         self.item_details_cache: Dict[str, Any] = {}
         self.last_sync_time: float = 0
+        # Syncs in flight. Reported with every list answer, so the widget can
+        # tell an empty vault from a list that has not arrived yet. A count,
+        # not a flag: a write starts its own sync while the first may still
+        # be running, and a flag dropped by whichever finished first.
+        self._syncs_in_flight: int = 0
         self.is_unlocked: bool = False
         self.account_info: Dict[str, Any] = {}
         self.last_status_check: float = 0
@@ -386,7 +391,7 @@ class OmaPassService:
                     has_items = bool(self.items)
 
                 if not has_items:
-                    threading.Thread(target=self.sync, daemon=True).start()
+                    self._start_sync(if_idle=True)
 
                 with self.lock:
                     return {
@@ -557,8 +562,49 @@ class OmaPassService:
             }
         return {"ok": True, "message": "Vault locked, clipboard wiped, and cache cleared."}
 
+    @property
+    def syncing(self) -> bool:
+        return self._syncs_in_flight > 0
+
+    def _start_sync(self, if_idle: bool = False) -> None:
+        """Syncs in the background, and says so from the moment it is asked.
+
+        The count goes up here rather than in the thread: a list request can
+        reach the daemon before the thread has run, and it has to be told a
+        sync is coming or it answers "no items" for a vault that is merely
+        not loaded yet. `if_idle` skips the start when one is already running,
+        for the callers that only need some sync to happen; a write always
+        starts its own, since one already in flight may have listed before
+        the write.
+        """
+        with self.lock:
+            if if_idle and self._syncs_in_flight > 0:
+                return
+            self._syncs_in_flight += 1
+        threading.Thread(target=self._run_started_sync, daemon=True).start()
+
+    def _run_started_sync(self) -> None:
+        # Through sync(), which counts itself while it runs, so a sync started
+        # here is counted twice for its duration and not at all after: the
+        # start's own count is what covers the gap before this thread runs.
+        # Also the seam the tests use to keep a write from reaching op.
+        try:
+            self.sync()
+        finally:
+            with self.lock:
+                self._syncs_in_flight -= 1
+
     def sync(self) -> Dict[str, Any]:
         """Syncs item metadata from 1Password into memory cache."""
+        with self.lock:
+            self._syncs_in_flight += 1
+        try:
+            return self._sync_now()
+        finally:
+            with self.lock:
+                self._syncs_in_flight -= 1
+
+    def _sync_now(self) -> Dict[str, Any]:
         if not self.check_op_installed():
             return {"ok": False, "error": "op CLI not installed"}
 
@@ -633,6 +679,13 @@ class OmaPassService:
         """Performs fast in-memory search and category filtering."""
         with self.lock:
             items = list(self.items)
+            never_synced = self.last_sync_time <= 0
+            unlocked = self.is_unlocked
+        # An open vault that has never been listed is listed now, whoever
+        # asks: the status check that normally starts the sync is not the only
+        # way to arrive here with nothing.
+        if unlocked and never_synced and not items:
+            self._start_sync(if_idle=True)
 
         q = _text(query).strip().lower()
         cat = _text(category).strip().upper()
@@ -696,11 +749,15 @@ class OmaPassService:
         results.sort(key=lambda pair: (-pair[0], _text(pair[1].get("title")).lower()))
         matched = [r[1] for r in results[:limit]]
 
+        with self.lock:
+            syncing = self.syncing
         return {
             "ok": True,
             "items": matched,
             "totalMatched": len(results),
             "totalItems": len(items),
+            # An empty list while this is set is not an empty vault.
+            "syncing": syncing,
         }
 
     def fetch_field(self, item_id: str, field: str) -> Tuple[bool, str]:
@@ -1391,7 +1448,7 @@ class OmaPassService:
                     "favorite": bool(created.get("favorite", False)),
                     "updatedAt": created.get("updated_at", ""),
                 }, epoch)
-            threading.Thread(target=self.sync, daemon=True).start()
+            self._start_sync()
 
         return {
             "ok": True,
@@ -1850,7 +1907,7 @@ class OmaPassService:
         if set_url:
             updates["url"] = normalized_url
         self._patch_cached_item(item_id, epoch, updates)
-        threading.Thread(target=self.sync, daemon=True).start()
+        self._start_sync()
         return {"ok": True, "id": item_id, "changed": touched,
                 "dryRun": False, "verified": True}
 
@@ -1915,7 +1972,7 @@ class OmaPassService:
             self._save_cache()
 
         self._note_op_success(epoch)
-        threading.Thread(target=self.sync, daemon=True).start()
+        self._start_sync()
         return {"ok": True, "id": item_id, "archived": archive}
 
     def open_desktop(self, item_id: str) -> Dict[str, Any]:

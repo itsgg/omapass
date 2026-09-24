@@ -1041,6 +1041,71 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
         self.assertFalse(status["dismissed"])
 
+    @patch("subprocess.run")
+    def test_a_list_says_when_the_vault_is_still_being_synced(self, mock_run):
+        """An empty answer before the first sync is not an empty vault.
+
+        The widget showed "No items in vault" between the unlock and the end
+        of the first sync, which can take as long as op takes to list.
+        """
+        self.service.items = []
+        self.service.is_unlocked = True
+        self.service.last_sync_time = 0
+        started = []
+        with patch.object(self.service, "_start_sync", side_effect=lambda if_idle=False: started.append(if_idle) or setattr(self.service, "_syncs_in_flight", 1)):
+            res = self.service.search_items(query="")
+        self.assertEqual(res["items"], [])
+        self.assertTrue(res["syncing"])
+        self.assertEqual(started, [True])
+
+        # Once listed, an empty vault is reported as one.
+        self.service._syncs_in_flight = 0
+        self.service.last_sync_time = time.time()
+        with patch.object(self.service, "_start_sync") as start:
+            res = self.service.search_items(query="")
+        self.assertFalse(res["syncing"])
+        start.assert_not_called()
+
+    def test_a_locked_vault_with_nothing_listed_starts_no_sync(self):
+        """The refusal direction of the test above: same state, vault locked."""
+        self.service.is_unlocked = False
+        self.service.last_sync_time = 0
+        with patch.object(self.service, "_start_sync") as start:
+            res = self.service.search_items(query="")
+        start.assert_not_called()
+        self.assertFalse(res["syncing"])
+
+    def test_sync_raises_the_flag_for_its_whole_run_and_lowers_it_after(self):
+        seen = {}
+
+        def fake_sync_now():
+            seen["during"] = self.service.syncing
+            return {"ok": True}
+
+        with patch.object(self.service, "_sync_now", side_effect=fake_sync_now):
+            self.service.sync()
+        self.assertTrue(seen["during"])
+        self.assertFalse(self.service.syncing)
+
+        # The flag goes up when the sync is asked for, before the thread runs.
+        with patch("threading.Thread") as thread:
+            self.service._start_sync(if_idle=True)
+            self.assertTrue(self.service.syncing)
+            thread.return_value.start.assert_called_once()
+            # A second idle request while one is running starts nothing.
+            self.service._start_sync(if_idle=True)
+            self.assertEqual(thread.return_value.start.call_count, 1)
+            # A write's request always does.
+            self.service._start_sync()
+            self.assertEqual(thread.return_value.start.call_count, 2)
+            # Two in flight: the first to finish must not say "done".
+            threads = [c.kwargs["target"] for c in thread.call_args_list]
+        with patch.object(self.service, "_sync_now", return_value={"ok": True}):
+            threads[0]()
+            self.assertTrue(self.service.syncing)
+            threads[1]()
+            self.assertFalse(self.service.syncing)
+
     def test_unlock_does_not_open_quick_access(self):
         """Quick Access is a search window: it authorizes nothing.
 
