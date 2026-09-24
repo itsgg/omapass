@@ -541,6 +541,7 @@ BarWidget {
   function runHelper(proc, payload) {
     proc.command = root.helperCommand(payload)
     proc.deadlineMs = root.helperDeadlineFor(payload)
+    if (proc.stdout && proc.stdout.stopped !== undefined) proc.stdout.stopped = false
     proc.stdinEnabled = true
     proc.running = true
     proc.write(JSON.stringify(payload))
@@ -563,7 +564,10 @@ BarWidget {
   function helperTimedOut(proc, what) {
     if (!proc.running) return
     // SIGKILL: a deadline that can be argued with is not one. The exit
-    // handlers then run as for any other exit and clear the state they own.
+    // handlers then run as for any other exit and clear the state they own,
+    // and the collector is told, so what arrived before the kill is not
+    // parsed as an answer.
+    if (proc.stdout && proc.stdout.stopped !== undefined) proc.stdout.stopped = true
     proc.signal(9)
     root.showToast("The helper did not answer (" + what + ") and was stopped")
   }
@@ -587,6 +591,29 @@ BarWidget {
       }
     }
   }
+  // A live cap on what a helper may answer, the widget's own half of the
+  // bound the helper keeps (it refuses a daemon answer over 1 MB while
+  // reading it). The text is watched as it arrives, not read whole at the
+  // end, and the helper is killed the moment it passes the cap; what was
+  // collected is never parsed. The exit handlers then run as for any exit.
+  component CappedCollector: StdioCollector {
+    id: collector
+    required property var proc
+    required property string what
+    property int cap: 2097152
+    // Set here past the cap, and by helperTimedOut past the deadline; reset
+    // by runHelper for the next request, since the widget's collectors are
+    // reused. A handler that sees it never parses what was collected.
+    property bool stopped: false
+    waitForEnd: false
+    onTextChanged: {
+      if (collector.stopped || collector.text.length <= collector.cap) return
+      collector.stopped = true
+      collector.proc.signal(9)
+      root.showToast("The helper's answer (" + collector.what + ") was too large and was stopped")
+    }
+  }
+
   HelperDeadline { proc: statusProc; what: "status" }
   HelperDeadline { proc: searchProc; what: "list" }
   HelperDeadline { proc: itemDetailsProc; what: "item" }
@@ -607,9 +634,11 @@ BarWidget {
     environment: root.helperEnvironment
     // Set per request by runHelper; HelperDeadline above enforces it.
     property int deadlineMs: 20000
-    stdout: StdioCollector {
-      waitForEnd: true
+    stdout: CappedCollector {
+      proc: statusProc
+      what: "status"
       onStreamFinished: {
+        if (stopped) { root.endUnlockWaitIfOver(); return }
         try {
           var resp = JSON.parse(text)
           root.installed = resp.installed !== false
@@ -634,18 +663,23 @@ BarWidget {
             root.refreshItems()
           }
         } catch (e) {}
-        // The wait for an unlock ends with the last check's verdict, whatever
-        // it was. Once polling is over and no unlock is still queued, a reply
-        // that is not "unlocked" (a lock, a helper error, no output at all)
-        // has to drop the flag, or some later unlock would open the popup
-        // unasked. Outside the try, so a reply that cannot be parsed counts.
-        if (!root.unlocked && !unlockPollTimer.running && !root.unlockActionPending) {
-          root.resumeAfterUnlock = false
-        }
+        // Outside the try, so a reply that cannot be parsed counts.
+        root.endUnlockWaitIfOver()
       }
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) root.showToast("Helper failed (exit " + exitCode + ")")
+    }
+  }
+
+  // The wait for an unlock ends with the last check's verdict, whatever it
+  // was. Once polling is over and no unlock is still queued, a reply that
+  // is not "unlocked" (a lock, a helper error, no output at all, a killed
+  // helper) has to drop the flag, or some later unlock would open the
+  // popup unasked.
+  function endUnlockWaitIfOver() {
+    if (!root.unlocked && !unlockPollTimer.running && !root.unlockActionPending) {
+      root.resumeAfterUnlock = false
     }
   }
 
@@ -669,9 +703,11 @@ BarWidget {
     // output, a helper that died) cannot say a sync is running, and leaving
     // vaultSyncing set on it kept "Loading vault..." up for ever.
     property bool answered: false
-    stdout: StdioCollector {
-      waitForEnd: true
+    stdout: CappedCollector {
+      proc: searchProc
+      what: "list"
       onStreamFinished: {
+        if (stopped) return
         try {
           var resp = JSON.parse(text)
           // A list fetched before the vault locked must not repopulate the
@@ -744,9 +780,11 @@ BarWidget {
   // objects, so a fresh one can replace a used one and take its buffer with it.
   Component {
     id: detailsCollector
-    StdioCollector {
-      waitForEnd: true
+    CappedCollector {
+      proc: itemDetailsProc
+      what: "item"
       onStreamFinished: {
+        if (stopped) return
         root.loadingDetails = false
         // Closing the popup runs forgetDetails(); without this guard the
         // in-flight response walks straight back in and repopulates the
@@ -927,9 +965,11 @@ BarWidget {
     // code belongs to the window that just ended, and giving it a fresh
     // countdown would show an expired code as good for a full period.
     property double requestedAt: 0
-    stdout: StdioCollector {
-      waitForEnd: true
+    stdout: CappedCollector {
+      proc: otpProc
+      what: "code"
       onStreamFinished: {
+        if (stopped) { root.scheduleTotpRetry(); return }
         var ok = false
         try {
           var resp = JSON.parse(text)
@@ -1158,9 +1198,11 @@ BarWidget {
     environment: root.helperEnvironment
     // Set per request by runHelper; HelperDeadline above enforces it.
     property int deadlineMs: 20000
-    stdout: StdioCollector {
-      waitForEnd: true
+    stdout: CappedCollector {
+      proc: vaultsProc
+      what: "vaults"
       onStreamFinished: {
+        if (stopped) return
         try {
           var resp = JSON.parse(text)
           if (resp.ok && resp.vaults) root.vaults = resp.vaults
@@ -1228,9 +1270,11 @@ BarWidget {
     environment: root.helperEnvironment
     // Set per request by runHelper; HelperDeadline above enforces it.
     property int deadlineMs: 20000
-    stdout: StdioCollector {
-      waitForEnd: true
+    stdout: CappedCollector {
+      proc: actionProc
+      what: "action"
       onStreamFinished: {
+        if (stopped) return
         var job = root.runningAction
         root.lastActionFailed = false
         // Recorded on the job itself, not just in a property: finishAction

@@ -292,6 +292,20 @@ class TestWidgetSide(unittest.TestCase):
             self.assertIn(f"HelperDeadline {{ proc: {pid};", WIDGET, pid)
         self.assertIn("proc.deadlineMs = root.helperDeadlineFor(payload)", WIDGET)
 
+    def test_every_collector_is_capped_and_watches_the_stream_live(self):
+        # The component is the one StdioCollector; every use is the capped one.
+        self.assertEqual(WIDGET.count("StdioCollector {"), 1)
+        self.assertIn("component CappedCollector: StdioCollector {", WIDGET)
+        self.assertEqual(WIDGET.count("CappedCollector {\n"), 6)
+        self.assertNotIn("waitForEnd: true", WIDGET)
+        block = WIDGET[WIDGET.index("component CappedCollector"):][:900]
+        self.assertIn("waitForEnd: false", block)
+        self.assertIn("collector.proc.signal(9)", block)
+        # Nothing parses a truncated answer, whether the cap or the deadline stopped it.
+        self.assertEqual(WIDGET.count("if (stopped)"), WIDGET.count("CappedCollector {\n"))
+        self.assertIn("proc.stdout.stopped = false", WIDGET)
+        self.assertIn("proc.stdout.stopped = true", WIDGET)
+
 
 class TestDaemonSpawn(IsolatedRuntimeDir):
     def test_the_daemon_is_started_by_the_fixed_interpreter_with_a_closed_environment(self):

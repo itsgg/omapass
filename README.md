@@ -353,9 +353,10 @@ other way to take the helper down:
   reaps it.
 - **A live cap on output.** The helper reads a program's stdout and stderr as
   the bytes arrive and stops the program the moment it passes 32 MB, rather
-  than buffering whatever it produces and looking afterwards. The widget's
-  own input is bounded by the helper, which refuses a daemon answer over 1 MB
-  while reading it.
+  than buffering whatever it produces and looking afterwards. The widget does
+  the same to the helper: each collector watches the answer as it arrives and
+  kills the request past 2 MB, never parsing what it collected; and the helper
+  itself refuses a daemon answer over 1 MB while reading it.
 
 ## CLI Usage
 
