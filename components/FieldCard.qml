@@ -26,6 +26,8 @@ BorderSurface {
   signal copyRequested(string fieldId, string label)
   signal typeRequested(string fieldId, string label)
   signal visibilityRequested(real y, real h)
+  // The linked sign-in row: the account behind it is only in the app.
+  signal openRequested()
 
   readonly property bool focused: root.focusedIndex === root.index
   readonly property bool hot: focused || fieldHover.hovered
@@ -33,6 +35,10 @@ BorderSurface {
   // the model already gone, and an unguarded read throws on the way out.
   readonly property bool hasData: !!modelData
   readonly property bool showingValue: !(root.hasData && modelData.concealed && !root.revealed)
+  // A login that signs in through a provider. op names the provider and
+  // nothing else, so there is nothing here to copy or type; the app is the
+  // one place that shows which account it is.
+  readonly property bool linkedSignIn: root.hasData && modelData.type === "SSO"
 
   onFocusedChanged: if (focused) root.visibilityRequested(y, height)
 
@@ -112,7 +118,17 @@ BorderSurface {
       }
 
       Button {
-        visible: root.hasData && !!modelData.value
+        visible: root.linkedSignIn
+        iconText: "\u{f0510}"
+        tooltipText: "Which account: open in 1Password (o)"
+        accent: root.theme.accent
+        horizontalPadding: Style.space(6)
+        verticalPadding: Style.space(4)
+        onClicked: root.openRequested()
+      }
+
+      Button {
+        visible: root.hasData && !!modelData.value && !root.linkedSignIn
         iconText: "\u{f030c}"
         tooltipText: "Auto-type into active window (t)"
         accent: root.theme.accent
@@ -122,7 +138,7 @@ BorderSurface {
       }
 
       Button {
-        visible: root.hasData && !!modelData.value
+        visible: root.hasData && !!modelData.value && !root.linkedSignIn
         iconText: "\u{f018f}"
         tooltipText: "Copy " + Model.fieldDisplayName(root.modelData) + " (c)"
         accent: root.theme.accent

@@ -152,9 +152,21 @@ BarWidget {
     }
   }
 
+  // A login that signs in through Google, Apple and the like. op reports
+  // the provider and nothing else: which account is linked is not in its
+  // output in any form, so the row cannot be copied or typed, and the one
+  // useful action is the app, which does show it.
+  function isLinkedSignIn(f) {
+    return !!(f && f.type === "SSO")
+  }
+
   function copyFocusedDetailField() {
     var f = root.focusedDetailField
     if (!f) return
+    if (root.isLinkedSignIn(f)) {
+      root.showToast("Which account is only shown in the 1Password app: press o")
+      return
+    }
     // An address is not a secret and has no field identity to name.
     if (f.kind === "url") {
       root.copyRawValue(f.href, "URL", root.itemDetails ? root.itemDetails.title : "")
@@ -170,6 +182,10 @@ BarWidget {
   function typeFocusedDetailField() {
     var f = root.focusedDetailField
     if (!f) return
+    if (root.isLinkedSignIn(f)) {
+      root.showToast("Which account is only shown in the 1Password app: press o")
+      return
+    }
     if (f.kind === "url") {
       root.showToast("A website opens with w or copies with c")
       return
@@ -979,6 +995,11 @@ BarWidget {
   function startEdit() {
     if (!root.itemDetails) return
     var d = root.itemDetails
+    if (d.editable === false) {
+      // op refuses the whole edit on a login that signs in with a provider.
+      root.showToast("1Password's CLI cannot edit this login: edit it in the app (o)")
+      return
+    }
     root.forgetCreateForm()
     root.currentView = "create"
     createForm.category = String(d.category || "LOGIN").toUpperCase()
@@ -2494,6 +2515,7 @@ BarWidget {
                 onToggleRevealRequested: root.detailRevealed = !root.detailRevealed
                 onCopyRequested: function(fieldId, label) { root.copyDetailField(fieldId, label) }
                 onTypeRequested: function(fieldId, label) { root.typeDetailField(fieldId, label) }
+                onOpenRequested: root.openItemInDesktop()
                 onVisibilityRequested: function(y, h) { root.ensureDetailVisible(y, h) }
               }
             }

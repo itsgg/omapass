@@ -102,6 +102,18 @@ class TestEditItem(IsolatedRuntimeDir):
                     res = self.service.edit_item(item_id="i1", **kwargs)
         return res, calls
 
+    def test_a_login_that_signs_in_with_a_provider_is_refused_before_the_dry_run(self):
+        """op 2.39 rejects any edit to such an item: "unsupported field type:
+        ssoLogin". Saying so first spares the user a form that cannot save."""
+        item = json.loads(json.dumps(FULL_ITEM))
+        item["fields"].append({"id": "sso", "type": "UNKNOWN", "label": "sign in with",
+                               "section": {"id": "sec1"}})
+        res, calls = self._edit(item=item, changes={"username": "new-user"})
+        self.assertFalse(res["ok"])
+        self.assertIn("signs in with a provider", res["error"])
+        self.assertEqual(calls["dry"], [])
+        self.assertEqual(calls["write"], [])
+
     def test_only_the_named_field_is_written(self):
         """The whole point: nothing the form did not show is mentioned at all."""
         res, calls = self._edit(changes={"username": "new-user"})

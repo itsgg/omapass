@@ -40,6 +40,8 @@ function fieldIcon(field) {
   var type = String(field.type || "").toUpperCase();
   var label = String(field.label || "").toLowerCase();
 
+  // A login that signs in through a provider: an identity, not a secret.
+  if (type === "SSO") return "󰋽";
   if (purpose === "PASSWORD" || fid.indexOf("password") !== -1 || fid.indexOf("pin") !== -1 || label.indexOf("password") !== -1 || label.indexOf("pin") !== -1) return "󰌆";
   if (purpose === "USERNAME" || fid.indexOf("user") !== -1 || label.indexOf("user") !== -1 || fid.indexOf("email") !== -1 || label.indexOf("email") !== -1) return "󰋽";
   if (type === "OTP" || fid.indexOf("otp") !== -1 || fid.indexOf("totp") !== -1 || label.indexOf("one-time") !== -1) return "󰄬";

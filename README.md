@@ -103,10 +103,14 @@ renames the item, drops a website, a section, an attachment or a passkey is
 refused and nothing is written. So is a preview that cannot be read at all, because an
 edit that cannot be checked is not one worth guessing at.
 
-Two things the edit form will not do, because op cannot: it cannot remove a
+Three things the edit form will not do, because op cannot: it cannot remove a
 website (`--url` has no empty form, so the form says so instead of silently
-doing nothing), and it cannot edit custom fields, which have no stable name to
-address safely. Both are one click away in the 1Password app.
+doing nothing), it cannot edit custom fields, which have no stable name to
+address safely, and it cannot edit a login that signs in with Google, Apple or
+another provider at all (op 2.39 rejects any edit to such an item with
+"unsupported field type: ssoLogin"; the pencil says so instead of opening the
+form). All three are one click away in the 1Password app, which **o** opens on
+the item.
 
 ## Keyboard
 
@@ -187,6 +191,11 @@ leave. `tools/audit/unlockkey.sh` sends a real Return to the locked card and
 follows the popup out of 1Password's way and back.
 
 Revealing follows the focused field: move off it and it re-conceals.
+
+A login that signs in with Google, Apple or another provider shows a **Sign in
+with** row naming the provider. Which account is linked is not something `op`
+reports in any form, so the row cannot be copied or typed; its one action is
+**o**, which opens the item in the 1Password app, where the account is shown.
 
 ## Binding it to a key
 

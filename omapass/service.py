@@ -1143,6 +1143,7 @@ class OmaPassService:
 
             fields_list: List[Dict[str, Any]] = []
             notes_text = ""
+            signs_in_with = False
             has_otp = False
             totp_code = ""
             totp_period = DEFAULT_TOTP_PERIOD
@@ -1165,6 +1166,26 @@ class OmaPassService:
                 if fpurpose == "NOTES" or fid == "notesPlain" or flabel.lower() in ("notes", "secure notes"):
                     if fval and not notes_text:
                         notes_text = str(fval)
+                    continue
+
+                if ftype == "UNKNOWN" and flabel.lower() == "sign in with":
+                    # A login that signs in through Google, Apple and the
+                    # like. op reports this field with no value at all, and
+                    # the linked account appears nowhere in its output, so
+                    # the row can name the provider and no more; the item
+                    # list carries that as "Signs in with Google". op also
+                    # refuses to edit any item holding this field (2.39:
+                    # "unsupported field type: ssoLogin"), see edit_item.
+                    signs_in_with = True
+                    fields_list.append({
+                        "id": fid,
+                        "label": "Sign in with",
+                        "value": self._sign_in_provider(item_id) or "a linked account",
+                        "type": "SSO",
+                        "purpose": "",
+                        "section": fsection,
+                        "concealed": False,
+                    })
                     continue
 
                 if ftype == "OTP":
@@ -1206,6 +1227,9 @@ class OmaPassService:
                 fid = _text(f.get("id")).lower()
                 purpose = _text(f.get("purpose")).upper()
                 lbl = _text(f.get("label")).lower()
+                if _text(f.get("type")) == "SSO":
+                    # The identity of the item, where a username would be.
+                    return 0
                 if purpose == "USERNAME" or "username" in fid or "email" in fid or "user" in fid or "login" in fid:
                     return 0
                 if purpose == "PASSWORD" or "password" in fid or "pin" in fid or "pass" in lbl:
@@ -1237,6 +1261,9 @@ class OmaPassService:
                 # knows to show the banner and fetch a live code on reopen.
                 "hasTotp": bool(has_otp or totp_code),
                 "totpPeriod": totp_period,
+                # False when op itself will refuse the edit, so the widget can
+                # say so before the form rather than after the save.
+                "editable": not signs_in_with,
             }
 
             with self.lock:
@@ -1528,6 +1555,36 @@ class OmaPassService:
             dry_run=dry_run,
         )
 
+    def _sign_in_provider(self, item_id: str) -> str:
+        """The provider a linked sign-in uses, from the item list's wording.
+
+        `op item list` puts "Signs in with Google" where a username would be,
+        and that phrase is the only place the provider is named at all: the
+        field itself comes back empty. Matched loosely on purpose, since the
+        wording is op's and may move; a miss costs the provider's name, never
+        a wrong one.
+        """
+        with self.lock:
+            for item in self.items:
+                if item.get("id") == item_id:
+                    text = _text(item.get("username"))
+                    break
+            else:
+                return ""
+        marker = "signs in with "
+        pos = text.lower().find(marker)
+        return text[pos + len(marker):].strip() if pos >= 0 else ""
+
+    @staticmethod
+    def _signs_in_with_provider(raw: Dict[str, Any]) -> bool:
+        """True if the item carries a linked sign-in, which op cannot edit."""
+        for f in raw.get("fields", []) or []:
+            if not isinstance(f, dict):
+                continue
+            if _text(f.get("type")).upper() == "UNKNOWN" and _text(f.get("label")).lower() == "sign in with":
+                return True
+        return False
+
     def _raw_item(self, item_id: str) -> Tuple[bool, Any]:
         """op's own full JSON for an item, unparsed and unnarrowed.
 
@@ -1818,6 +1875,13 @@ class OmaPassService:
         ok, raw = self._raw_item(item_id)
         if not ok:
             return {"ok": False, "error": str(raw)}
+        if self._signs_in_with_provider(raw):
+            # op 2.39 rejects the whole edit, whichever field is assigned:
+            # "unsupported field type: ssoLogin". Saying so here is kinder
+            # than relaying that after the user has filled the form.
+            return {"ok": False,
+                    "error": "1Password's CLI cannot edit a login that signs in "
+                             "with a provider. Edit it in the 1Password app."}
 
         current = self._field_values(raw)
         assigned: Dict[str, str] = {}

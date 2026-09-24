@@ -1068,6 +1068,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_a_locked_vault_with_nothing_listed_starts_no_sync(self):
         """The refusal direction of the test above: same state, vault locked."""
+        self.service.items = []
         self.service.is_unlocked = False
         self.service.last_sync_time = 0
         with patch.object(self.service, "_start_sync") as start:
@@ -1105,6 +1106,65 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.assertTrue(self.service.syncing)
             threads[1]()
             self.assertFalse(self.service.syncing)
+
+    @patch("subprocess.run")
+    def test_a_linked_sign_in_is_shown_as_the_provider_and_cannot_be_edited(self, mock_run):
+        """op reports the "sign in with" field with no value at all.
+
+        The linked account is nowhere in its output, so the row can only name
+        the provider, which the item list carries as "Signs in with Google".
+        op also refuses to edit such an item (2.39: "unsupported field type:
+        ssoLogin"), so the item says it is not editable.
+        """
+        self.service.items = [{"id": "sso1", "title": "accounts.razorpay.com",
+                               "username": "Signs in with Google", "category": "LOGIN"}]
+        raw = {
+            "id": "sso1", "title": "accounts.razorpay.com", "category": "LOGIN",
+            "vault": {"name": "Personal"},
+            "fields": [
+                {"id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username"},
+                {"id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password"},
+                {"id": "bm2g", "type": "UNKNOWN", "label": "sign in with",
+                 "section": {"id": "s1", "label": "Saved on accounts.razorpay.com"}},
+                {"id": "kid", "type": "STRING", "label": "id", "value": "rzp_live_x",
+                 "section": {"id": "s1", "label": "Saved on accounts.razorpay.com"}},
+            ],
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(raw), stderr="")
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("sso1")
+        self.assertTrue(res["ok"])
+        item = res["item"]
+        self.assertFalse(item["editable"])
+        sso = [f for f in item["fields"] if f["type"] == "SSO"]
+        self.assertEqual(len(sso), 1)
+        self.assertEqual(sso[0]["label"], "Sign in with")
+        self.assertEqual(sso[0]["value"], "Google")
+        self.assertFalse(sso[0]["concealed"])
+        # First, where the username would be.
+        self.assertEqual(item["fields"][0]["id"], "bm2g")
+        # A field with a value still comes through.
+        self.assertIn("kid", [f["id"] for f in item["fields"]])
+
+    @patch("subprocess.run")
+    def test_a_linked_sign_in_whose_provider_is_unknown_still_gets_a_row(self, mock_run):
+        self.service.items = []
+        raw = {"id": "sso2", "title": "X", "category": "LOGIN",
+               "fields": [{"id": "f", "type": "UNKNOWN", "label": "sign in with"}]}
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(raw), stderr="")
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("sso2")
+        self.assertEqual(res["item"]["fields"][0]["value"], "a linked account")
+
+    @patch("subprocess.run")
+    def test_an_ordinary_login_is_editable(self, mock_run):
+        raw = {"id": "l1", "title": "GitHub", "category": "LOGIN",
+               "fields": [{"id": "username", "type": "STRING", "purpose": "USERNAME",
+                           "label": "username", "value": "octocat"}]}
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(raw), stderr="")
+        with patch.object(self.service, "check_op_installed", return_value=True):
+            res = self.service.get_item("l1")
+        self.assertTrue(res["item"]["editable"])
 
     def test_unlock_does_not_open_quick_access(self):
         """Quick Access is a search window: it authorizes nothing.

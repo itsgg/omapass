@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.itsgg.omapass",
   "name": "OmaPass",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Ganesh Gunasegaran <me@itsgg.com>",
   "license": "MIT",
   "description": "Native 1Password bar widget and instant vault launcher for Omarchy",
