@@ -369,6 +369,38 @@ BarWidget {
   // directory containing a space would otherwise yield an unusable path.
   readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("omapass-agent.py").toString().replace(/^file:\/\//, ""))
 
+  // Everything a helper process may inherit, by name. Each Process below
+  // clears the child's environment and hands it exactly this, so a PATH,
+  // LD_PRELOAD or PYTHONPATH the shell happened to be started with never
+  // reaches a process that is about to be given a credential. The helper
+  // builds the same list for its own children (omapass/boundary.py explains
+  // each group), and a test keeps the two lists identical.
+  readonly property var helperEnvironmentNames: [
+    "HOME", "USER", "LOGNAME", "LANG",
+    "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_TIME", "LC_NUMERIC", "LC_COLLATE",
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "XDG_STATE_HOME", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS",
+    "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "XDG_SESSION_ID",
+    "XDG_SESSION_DESKTOP", "XDG_SEAT", "XDG_VTNR",
+    "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "XCURSOR_SIZE", "XCURSOR_THEME", "HYPRCURSOR_SIZE", "HYPRCURSOR_THEME",
+    "GDK_SCALE", "OZONE_PLATFORM", "ELECTRON_OZONE_PLATFORM_HINT",
+    "OP_ACCOUNT"
+  ]
+  readonly property var helperEnvironment: {
+    // A fixed PATH, the same directories the helper trusts, rather than the
+    // shell's: the helper resolves op and the rest by itself, but a child of
+    // a child (xdg-open's browser, say) still reads this.
+    var env = { "PATH": "/usr/local/bin:/usr/bin:/bin" }
+    for (var i = 0; i < root.helperEnvironmentNames.length; i++) {
+      var name = root.helperEnvironmentNames[i]
+      var value = Quickshell.env(name)
+      if (value !== undefined && value !== null && String(value).length > 0) env[name] = String(value)
+    }
+    return env
+  }
+
   readonly property color colForeground: bar ? bar.foreground : Color.foreground
   readonly property color colDim: bar ? Qt.darker(bar.foreground, 1.45) : Color.muted
   readonly property color colAccent: Color.accent
@@ -457,8 +489,15 @@ BarWidget {
   // The payload goes to the helper on stdin ("request -"), never as an
   // argument: /proc/<pid>/cmdline is readable by every process on the machine,
   // so a copied credential in argv is a credential published to the machine.
+  //
+  // One fixed interpreter, never whatever python3 is first on PATH, and in
+  // isolated mode: -I ignores every PYTHON* variable, skips the user site
+  // directory and keeps the script's own directory off sys.path, so the only
+  // code that runs is the interpreter's own and the package the helper adds
+  // back by hand. This is what makes the helper's own protections the first
+  // thing the credential meets.
   function helperCommand(payload) {
-    return ["python3", root.helperPath, "request", "-"]
+    return ["/usr/bin/python3", "-I", root.helperPath, "request", "-"]
   }
 
   // Starts a helper request, handing the JSON to the child on stdin and then
@@ -480,6 +519,8 @@ BarWidget {
   Process {
     id: statusProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -534,6 +575,8 @@ BarWidget {
   Process {
     id: searchProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     // Set when a query arrives while a search is already in flight, so the
     // last keystroke is never the one that gets dropped.
     property bool pending: false
@@ -636,6 +679,8 @@ BarWidget {
   Process {
     id: itemDetailsProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     // The item this fetch was issued for, so a response that lands after the
     // user closed or navigated away cannot be adopted.
     property string requestedId: ""
@@ -769,6 +814,8 @@ BarWidget {
   Process {
     id: otpProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     // The item this request was issued for. A response that arrives after the
     // user has moved on must not overwrite the code shown for another item.
     property string requestedId: ""
@@ -998,6 +1045,8 @@ BarWidget {
   Process {
     id: vaultsProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1064,6 +1113,8 @@ BarWidget {
   Process {
     id: actionProc
     running: false
+    clearEnvironment: true
+    environment: root.helperEnvironment
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

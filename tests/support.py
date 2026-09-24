@@ -27,6 +27,15 @@ class IsolatedRuntimeDir(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
+        # Every program the helper starts is resolved through the boundary,
+        # which only trusts what is really installed under /usr/bin. CI has
+        # none of op, wl-copy or wtype, so the tests would take the "not
+        # installed" branch everywhere. Pretend all of them exist; a test
+        # about a missing one patches this again with None.
+        tools = patch("omapass.boundary.tool",
+                      side_effect=lambda name: name if name.startswith("/") else f"/usr/bin/{name}")
+        tools.start()
+        self.addCleanup(tools.stop)
 
 
 LOGIN_ITEM = {

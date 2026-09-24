@@ -26,7 +26,7 @@ ln -sfn "$PLUGIN/Model.js" "$WORK/Model.js"
 ln -sfn "$PLUGIN/omapass-agent.py" "$WORK/omapass-agent.py"
 cp "$HERE/harness.qml" "$WORK/harness.qml"
 
-sed -e 's|^\( *\)return \["python3", root.helperPath, "request", "-"\]|\1return ["true"]|' \
+sed -e 's|^\( *\)return \["/usr/bin/python3", "-I", root.helperPath, "request", "-"\]|\1return ["/usr/bin/true"]|' \
     "$PLUGIN/BarWidget.qml" > "$WORK/OmaPassWidget.qml"
 
 OMAPASS_AUDIT_BACKDROP="${OMAPASS_AUDIT_BACKDROP:-}" \

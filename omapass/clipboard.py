@@ -19,6 +19,7 @@ import signal
 import subprocess
 import time
 
+from . import boundary
 from .config import WIPE_RETRY_DELAYS
 from .paths import (
     clipboard_lock_path,
@@ -75,7 +76,7 @@ def clipboard_holds(digest: str, timeout: float = 3.0) -> bool:
     if not digest:
         return True
     try:
-        res = subprocess.run(
+        res = boundary.run(
             ["wl-paste", "--no-newline"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
         )
@@ -96,7 +97,7 @@ def clipboard_holds(digest: str, timeout: float = 3.0) -> bool:
 def clear_clipboard_once(timeout: float = 3.0) -> bool:
     """Runs `wl-copy --clear`, returning whether it actually succeeded."""
     try:
-        res = subprocess.run(["wl-copy", "--clear"], timeout=timeout, check=False)
+        res = boundary.run(["wl-copy", "--clear"], timeout=timeout, check=False)
         return res.returncode == 0
     except Exception:
         return False
@@ -109,7 +110,7 @@ def warn_clipboard_not_cleared() -> None:
     giving up leaves a password sitting in the clipboard indefinitely.
     """
     try:
-        subprocess.run(
+        boundary.run(
             [
                 "notify-send",
                 "-a", "OmaPass",

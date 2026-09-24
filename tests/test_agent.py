@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from omapass import clipboard, fields, paths, service  # noqa: E402
+from omapass import boundary, clipboard, fields, paths, service  # noqa: E402
 
 
 class _AgentFacade:
@@ -162,7 +162,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         # that happens to have wl-copy, and takes the "not installed" branch
         # everywhere else.
         mock_popen.side_effect = FileNotFoundError("wl-copy not found")
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch.object(self.service, "fetch_field", return_value=(True, "secret123")):
                 res = self.service.copy_to_clipboard("item1", "password")
                 self.assertFalse(res["ok"])
@@ -312,7 +312,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_proc.returncode = 0
         mock_popen.return_value = mock_proc
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             res = self.service.copy_to_clipboard(value="my-password-value", field="Password", title="Amazon")
             self.assertTrue(res["ok"])
             self.assertEqual(res["field"], "Password")
@@ -611,7 +611,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         wl_copy.returncode = 0
         mock_popen.side_effect = [wl_copy, OSError("no fork for you")]
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch.object(service, "clear_clipboard_once", return_value=True) as mock_clear:
                 res = self.service.copy_to_clipboard(value="topsecret", field="password", timeout_seconds=30)
 
@@ -855,7 +855,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         wl_copy.returncode = 0
         mock_popen.side_effect = [wl_copy, OSError("no fork for you")]
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch.object(service, "clear_clipboard_once", return_value=False):
                 with patch.object(service, "warn_clipboard_not_cleared") as mock_warn:
                     res = self.service.copy_to_clipboard(value="topsecret", field="password", timeout_seconds=30)
@@ -913,7 +913,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.service.lock_epoch += 1  # a lock lands while op is running
             return True, "secret"
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch.object(self.service, "fetch_field", side_effect=lock_during_fetch):
                 with patch("subprocess.Popen") as mock_popen:
                     res = self.service.copy_to_clipboard("i1", "password")
@@ -929,7 +929,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
             self.service.lock_epoch += 1
             return True, "secret"
 
-        with patch("shutil.which", return_value="/usr/bin/wtype"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wtype"):
             with patch.object(self.service, "fetch_field", side_effect=lock_during_fetch):
                 with patch("subprocess.Popen") as mock_popen:
                     res = self.service.type_credentials("i1", "password")
@@ -950,7 +950,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_lock_reports_failure_when_nothing_actually_locked(self):
         with patch.object(service, "wipe_clipboard_now", return_value=True):
-            with patch("shutil.which", return_value="/usr/bin/1password"):
+            with patch("omapass.boundary.tool", return_value="/usr/bin/1password"):
                 with patch("subprocess.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
         self.assertFalse(res["ok"])
@@ -973,7 +973,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
     def test_lock_reports_failure_when_only_signout_was_possible_and_failed(self):
         """1Password not installed: the signout result is then the whole verdict."""
         with patch.object(service, "wipe_clipboard_now", return_value=True):
-            with patch("shutil.which", return_value=None):
+            with patch("omapass.boundary.tool", return_value=None):
                 with patch("subprocess.run", return_value=MagicMock(returncode=1)):
                     res = self.service.lock_vault()
         self.assertFalse(res["ok"])
@@ -988,7 +988,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
         before = self.service.lock_epoch
         with patch.object(service, "wipe_clipboard_now", side_effect=record):
-            with patch("shutil.which", return_value=None):
+            with patch("omapass.boundary.tool", return_value=None):
                 with patch("subprocess.run", return_value=MagicMock(returncode=0)):
                     self.service.lock_vault()
         self.assertEqual(seen["epoch_during_wipe"], before + 1)
@@ -1047,7 +1047,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         The approval prompt comes from the forced status check that follows,
         so opening Quick Access too just put a second window in the way.
         """
-        with patch("shutil.which", return_value="/usr/bin/1password"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/1password"):
             with patch.object(self.service, "desktop_app_running", return_value=True):
                 with patch("subprocess.Popen") as mock_popen:
                     res = self.service.unlock()
@@ -1057,7 +1057,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
         mock_popen.assert_not_called()
 
     def test_unlock_starts_the_app_when_it_is_not_running(self):
-        with patch("shutil.which", return_value="/usr/bin/1password"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/1password"):
             with patch.object(self.service, "desktop_app_running", return_value=False):
                 with patch("subprocess.Popen") as mock_popen:
                     res = self.service.unlock()
@@ -1084,18 +1084,21 @@ class TestOmaPassService(IsolatedRuntimeDir):
                 return MagicMock(pid=4242)
             return wl_copy
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch("subprocess.Popen", side_effect=capture):
                 self.service.copy_to_clipboard(value="s3cret", field="password", timeout_seconds=30)
 
         argv = launched["argv"]
-        script = pathlib.Path(argv[1])
+        at = argv.index("_wipe")
+        script = pathlib.Path(argv[at - 1])
         self.assertTrue(script.is_file(), f"wipe worker script does not exist: {script}")
         self.assertEqual(script.name, "omapass-agent.py")
+        # The fixed interpreter in isolated mode, the same one the widget uses.
+        self.assertEqual(argv[:at - 1], [boundary.PYTHON, "-I"])
 
         # And it must actually start: run it with a delay of 0 and no token,
         # which returns immediately without touching the clipboard.
-        proc = subprocess.run([argv[0], str(script), "_wipe", "0"],
+        proc = subprocess.run(argv[:at] + ["_wipe", "0"],
                               capture_output=True, text=True, timeout=30,
                               env={**os.environ, "OMAPASS_WIPE_TOKEN": ""})
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1113,7 +1116,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
                 seen["argv"] = argv
             return wl_copy
 
-        with patch("shutil.which", return_value="/usr/bin/wl-copy"):
+        with patch("omapass.boundary.tool", return_value="/usr/bin/wl-copy"):
             with patch("subprocess.Popen", side_effect=capture):
                 self.service.copy_to_clipboard(value="s3cret", field="password", timeout_seconds=0)
 
@@ -1121,7 +1124,7 @@ class TestOmaPassService(IsolatedRuntimeDir):
 
     def test_unlock_says_so_when_the_desktop_app_is_missing(self):
         """No terminal fallback: a manual op signin cannot reach this daemon."""
-        with patch("shutil.which", side_effect=lambda n: "/usr/bin/op" if n == "op" else None):
+        with patch("omapass.boundary.tool", side_effect=lambda n: "/usr/bin/op" if n == "op" else None):
             with patch("subprocess.Popen") as mock_popen:
                 res = self.service.unlock()
 

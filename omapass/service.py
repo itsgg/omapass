@@ -11,14 +11,13 @@ import json
 import os
 import pathlib
 import secrets
-import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import boundary
 from . import fields
 from .clipboard import (
     cancel_previous_wipe,
@@ -239,12 +238,12 @@ class OmaPassService:
                     pass
 
     def check_op_installed(self) -> bool:
-        return shutil.which("op") is not None
+        return boundary.tool("op") is not None
 
     def get_account_info_fast(self) -> Optional[Dict[str, str]]:
         """Quickly retrieves account info via `op account list` which never prompts on desktop."""
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "account", "list", "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -328,7 +327,7 @@ class OmaPassService:
 
         try:
             # Check status via `op user get --me` (1Password desktop app integration)
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "user", "get", "--me", "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -339,11 +338,14 @@ class OmaPassService:
             # have raised the dialog the user just answered.
             prompt_error = res.stderr if isinstance(res.stderr, str) else ""
             dismissed = bool(PROMPT_DISMISSED_RE.search(prompt_error))
-            # Fallback for standalone CLI session tokens. Not after a
+            # Fallback for a standalone CLI session: `op whoami` answers when
+            # op holds a session of its own. Under the closed environment that
+            # means a token the shell itself was started with, which is rare;
+            # the desktop app is the supported path (see unlock). Not after a
             # dismissal: the verdict is in, and a fallback that timed out
             # reported the cancel as a timeout, which raised the dialog again.
             if res.returncode != 0 and not dismissed:
-                res = subprocess.run(
+                res = boundary.run(
                     ["op", "whoami", "--format=json"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -452,7 +454,7 @@ class OmaPassService:
     def desktop_app_running() -> bool:
         """True when the 1Password desktop app is up to answer `op`."""
         try:
-            return subprocess.run(
+            return boundary.run(
                 ["pgrep", "-x", "1password"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -473,7 +475,7 @@ class OmaPassService:
         app's search window and authorizes nothing: the user got two windows
         and only one of them was the one to answer.
         """
-        if shutil.which("1password"):
+        if boundary.tool("1password"):
             if self.desktop_app_running():
                 return {
                     "ok": True,
@@ -481,7 +483,7 @@ class OmaPassService:
                     "message": "Approve the OmaPass request in 1Password.",
                 }
             try:
-                subprocess.Popen(
+                boundary.popen(
                     ["1password", "--silent"],
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
@@ -500,7 +502,7 @@ class OmaPassService:
         # which this daemon never sees, so the user would sign in and stay
         # locked. Carrying the token across would mean writing it to disk,
         # which is exactly what this helper promises not to do.
-        if not shutil.which("op"):
+        if not boundary.tool("op"):
             return {"ok": False, "error": "1Password CLI (op) is not installed."}
         return {
             "ok": False,
@@ -521,9 +523,9 @@ class OmaPassService:
             self._clear_cache()
 
         locked_app = None
-        if shutil.which("1password"):
+        if boundary.tool("1password"):
             try:
-                locked_app = subprocess.run(
+                locked_app = boundary.run(
                     ["1password", "--lock"], check=False, timeout=3.0
                 ).returncode == 0
             except Exception:
@@ -531,7 +533,7 @@ class OmaPassService:
 
         signed_out = None
         try:
-            signed_out = subprocess.run(
+            signed_out = boundary.run(
                 ["op", "signout"], check=False, timeout=3.0
             ).returncode == 0
         except Exception:
@@ -564,7 +566,7 @@ class OmaPassService:
             epoch = self.lock_epoch
 
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "item", "list", "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -719,7 +721,7 @@ class OmaPassService:
             with self.lock:
                 epoch = self.lock_epoch
             try:
-                res = subprocess.run(
+                res = boundary.run(
                     ["op", "item", "get", item_id, "--otp"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -802,7 +804,7 @@ class OmaPassService:
             if epoch != self.lock_epoch:
                 return {"ok": False, "error": "Vault was locked during this request"}
 
-        if not shutil.which("wl-copy"):
+        if not boundary.tool("wl-copy"):
             return {"ok": False, "error": "wl-copy is not installed"}
 
         try:
@@ -831,7 +833,7 @@ class OmaPassService:
                         # survives the wipe entirely. Verified: a plain copy
                         # lands in clipboard-history.json, a sensitive one
                         # does not.
-                        proc = subprocess.Popen(
+                        proc = boundary.popen(
                             ["wl-copy", "--sensitive"],
                             stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL,
@@ -893,8 +895,7 @@ class OmaPassService:
 
                         # The token travels in the environment, not argv:
                         # /proc/<pid>/cmdline is world-readable, environ is not.
-                        wipe_env = dict(
-                            os.environ,
+                        wipe_env = boundary.child_environment(
                             OMAPASS_WIPE_TOKEN=token,
                             # A fingerprint, not the secret, so the worker can
                             # tell whether the clipboard still holds what it
@@ -904,9 +905,8 @@ class OmaPassService:
                         try:
                             write_private(unique_tmp, token)
                             unique_tmp.replace(tp)
-                            wipe_proc = subprocess.Popen(
-                                [
-                                    sys.executable,
+                            wipe_proc = boundary.popen(
+                                boundary.interpreter() + [
                                     # The entry script, never __file__: a module
                                     # inside the package cannot be run on its own,
                                     # and Popen succeeds either way, so the copy
@@ -973,7 +973,7 @@ class OmaPassService:
             msg += f" Clears in {timeout_seconds}s."
 
         try:
-            subprocess.run(
+            boundary.run(
                 [
                     "notify-send",
                     "-a", "OmaPass",
@@ -993,7 +993,7 @@ class OmaPassService:
 
     def type_credentials(self, item_id: str = "", field: str = "", value: str = "") -> Dict[str, Any]:
         """Types credentials into active window using wtype with a brief focus delay."""
-        if not shutil.which("wtype"):
+        if not boundary.tool("wtype"):
             return {"ok": False, "error": "wtype is not installed."}
 
         with self.lock:
@@ -1022,7 +1022,7 @@ class OmaPassService:
                 # `wtype -` reads the text from stdin. Passing it as an
                 # argument would publish the credential in the process list
                 # for as long as wtype runs.
-                proc = subprocess.Popen(
+                proc = boundary.popen(
                     ["wtype", "-"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
@@ -1053,7 +1053,7 @@ class OmaPassService:
             epoch = self.lock_epoch
 
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "item", "get", item_id, "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1212,7 +1212,7 @@ class OmaPassService:
         with self.lock:
             epoch = self.lock_epoch
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "vault", "list", "--format=json"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=10.0,
@@ -1349,7 +1349,7 @@ class OmaPassService:
                 cmd.append("--dry-run")
 
             try:
-                res = subprocess.run(
+                res = boundary.run(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, timeout=30.0,
                 )
@@ -1481,7 +1481,7 @@ class OmaPassService:
         round trip lossless.
         """
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 ["op", "item", "get", item_id, "--format=json"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=15.0,
@@ -1857,7 +1857,7 @@ class OmaPassService:
     def _run_op_edit(self, cmd: List[str]) -> Tuple[bool, Any]:
         """Runs one op item edit invocation, returning its parsed JSON."""
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=25.0,
             )
@@ -1894,7 +1894,7 @@ class OmaPassService:
             cmd.append("--archive")
 
         try:
-            res = subprocess.run(
+            res = boundary.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=20.0,
             )
@@ -1922,7 +1922,7 @@ class OmaPassService:
         """Opens item in 1Password desktop app via onepassword URI."""
         uri = f"onepassword://item?i={item_id}"
         try:
-            subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            boundary.popen(["xdg-open", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -1935,7 +1935,7 @@ class OmaPassService:
         if not target:
             return {"ok": False, "error": "Refusing to open a non-web URL"}
         try:
-            subprocess.Popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            boundary.popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"ok": True, "url": target}
         except Exception as e:
             return {"ok": False, "error": str(e)}

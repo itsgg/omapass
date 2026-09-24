@@ -17,7 +17,15 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from .config import build_id, DETAILS_CACHE_TTL, MAX_REQUEST_BYTES, PROTOCOL_VERSION
+from . import boundary
+from .config import (
+    build_id,
+    DETAILS_CACHE_TTL,
+    MAX_REQUEST_BYTES,
+    PROTOCOL_VERSION,
+    STATUS_FALLBACK_TIMEOUT,
+    STATUS_OP_TIMEOUT,
+)
 from .paths import (
     daemon_lock_path,
     daemon_pid_path,
@@ -28,7 +36,6 @@ from .paths import (
     write_private,
     startup_lock_path,
 )
-from .config import STATUS_FALLBACK_TIMEOUT, STATUS_OP_TIMEOUT
 from .service import OmaPassService
 
 def send_socket_request(request: Dict[str, Any], timeout: float = 15.0) -> Optional[Dict[str, Any]]:
@@ -173,8 +180,12 @@ def ensure_daemon() -> bool:
             stop_stale_daemon()
 
             script_path = entry_script()
-            subprocess.Popen(
-                [sys.executable, str(script_path), "serve"],
+            # The fixed interpreter in isolated mode, with a closed
+            # environment: the daemon is the process that holds decrypted
+            # items, so nothing inherited may choose what runs as it.
+            boundary.popen(
+                boundary.interpreter() + [str(script_path), "serve"],
+                env=boundary.child_environment(),
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

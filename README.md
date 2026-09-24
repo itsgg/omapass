@@ -16,6 +16,7 @@ Built natively with Quickshell, Qt Quick/QML, and Python, OmaPass integrates dir
 - 󰌏 **Biometric unlock**: authorization goes through the desktop app's CLI integration, so unlocking is the same fingerprint prompt as the app itself.
 - 🎨 **Unified Omarchy Theming**: Automatically inherits your Omarchy colors, borders, font family, and blur.
 - 🛡️ **Secret Isolation**: Decrypted secrets are fetched on demand, expire from the helper's memory 90 seconds after they are fetched (a sweep clears them within a few seconds of that), and are piped straight to `wl-copy`, never passed as an argument. Every copy is taken off the clipboard after `clipboardTimeout` seconds, unless you copied something else first, in which case it is already gone and your clipboard is left alone.
+- 🔒 **A closed process boundary**: every process that handles a credential is started by a fixed interpreter in isolated mode, with an environment built from an allowlist rather than inherited, and `op`, `wl-copy` and the rest are run from `/usr/bin` and its neighbours rather than from whatever `PATH` says. See [Process boundary](#process-boundary).
 
 ## A look around
 
@@ -237,6 +238,7 @@ code outlives its 30-second window long before the cache entry expires.
 ## Requirements
 
 - [Omarchy Linux](https://omarchy.org/)
+- Python 3 at `/usr/bin/python3` (Omarchy's own; nothing outside the standard library)
 - `1password-cli` (`op` >= 2.20)
 - `wl-clipboard` (`wl-copy`)
 - `notify-send` (libnotify)
@@ -295,6 +297,40 @@ External dependencies, all invoked as separate processes and none bundled:
 paste side is how a wipe checks the clipboard still holds the secret rather
 than something you copied since), and optionally `wtype` for auto-type,
 `notify-send` for notifications, and `xdg-open` for websites.
+
+## Process boundary
+
+Every process this plugin starts is about to be handed a credential: the
+helper reads the request on stdin, the daemon holds decrypted items, `wl-copy`
+and `wtype` receive the secret itself. So *which* program starts, and under
+what environment, is a security question, and it is answered the same way on
+both sides of the widget-to-helper line:
+
+- **A fixed interpreter, isolated.** The widget runs the helper as
+  `/usr/bin/python3 -I`, never as whatever `python3` is first on `PATH`, and
+  the helper starts its daemon and its clipboard-wipe worker the same way.
+  Isolated mode ignores every `PYTHON*` variable, skips the user site
+  directory and keeps the script's directory off `sys.path`; the entry script
+  adds its own package directory back explicitly, and nothing else.
+- **A cleared environment.** The widget clears each helper process's
+  environment and hands it only an allowlist of session variables (`HOME`,
+  `XDG_*`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and the like; the list
+  is in `omapass/boundary.py`, with the reason for each group) plus a fixed
+  `PATH` of `/usr/local/bin:/usr/bin:/bin`. The helper builds the same
+  allowlist for every process it starts, and a test keeps the two lists
+  identical. Nothing that steers a loader or an interpreter (`LD_*`,
+  `PYTHON*`, an inherited `PATH`) survives either hop.
+- **Programs from trusted directories only.** `op`, `wl-copy`, `wl-paste`,
+  `wtype`, `xdg-open`, `notify-send` and the 1Password app are looked up in
+  those three directories and nowhere else, and the file found has to be a
+  regular executable, owned by root or by you, that neither it nor its
+  directory lets other users rewrite. A program that fails that check is
+  reported as not installed rather than run.
+
+Secret payloads never travel in `argv`: the request goes to the helper on
+stdin, the copied value to `wl-copy` on stdin, the typed value to `wtype` on
+stdin, and the wipe token in the worker's environment. The one exception is
+documented under [Editing and removing](#editing-and-removing).
 
 ## CLI Usage
 
